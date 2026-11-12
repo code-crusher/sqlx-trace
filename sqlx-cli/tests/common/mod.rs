@@ -80,12 +80,24 @@ impl TestDatabase {
         version: Option<i64>,
         dry_run: bool,
     ) -> Assert {
+        self.run_migration_with(&[], migrate_command, version, dry_run)
+    }
+
+    /// Like [`Self::run_migration()`], but also passes the given extra arguments.
+    pub fn run_migration_with(
+        &self,
+        extra_args: &[&str],
+        migrate_command: MigrateCommand,
+        version: Option<i64>,
+        dry_run: bool,
+    ) -> Assert {
         let mut command = Command::cargo_bin("sqlx").unwrap();
         command
             .arg("migrate")
             .args(migrate_command.as_ref().split_whitespace())
             .args(["--database-url", &self.connection_string(), "--source"])
-            .arg(&self.migrations_path);
+            .arg(&self.migrations_path)
+            .args(extra_args);
 
         if let Some(config_path) = &self.config_path {
             command.arg("--config").arg(config_path);

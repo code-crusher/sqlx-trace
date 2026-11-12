@@ -1,5 +1,6 @@
 mod common;
 
+use assert_cmd::cargo_bin_cmd;
 use common::MigrateCommand;
 use common::TestDatabase;
 
@@ -256,4 +257,159 @@ async fn ignored_chars() {
     db.run_migration(MigrateCommand::Run, None, false)
         .success()
         .stdout("");
+}
+
+#[tokio::test]
+async fn no_lock_migrations() {
+    let all_migrations: Vec<i64> = vec![
+        20230101000000,
+        20230201000000,
+        20230301000000,
+        20230401000000,
+        20230501000000,
+    ];
+
+    // `--no-lock` is accepted by `run`, including for dry runs, and by `revert`.
+    {
+        let db = TestDatabase::new("no_lock_run_revert", "migrations_reversible");
+
+        db.run_migration_with(&["--no-lock"], MigrateCommand::Run, None, true)
+            .success();
+        assert!(db.applied_migrations().await.is_empty());
+
+        db.run_migration_with(&["--no-lock"], MigrateCommand::Run, None, false)
+            .success();
+        assert_eq!(db.applied_migrations().await, all_migrations);
+
+        db.run_migration_with(&["--no-lock"], MigrateCommand::Revert, None, false)
+            .success();
+        assert_eq!(db.applied_migrations().await, all_migrations[..4]);
+    }
+
+    // `--no-lock` is accepted by `migrate override skip`.
+    {
+        let db = TestDatabase::new("no_lock_skip", "migrations_reversible");
+
+        db.run_migration_with(&["--no-lock"], MigrateCommand::Skip, None, false)
+            .success();
+        assert_eq!(db.applied_migrations().await, all_migrations);
+    }
+
+    // `--no-lock` is accepted by `database setup`.
+    {
+        let db = TestDatabase::new("no_lock_setup", "migrations_reversible");
+
+        cargo_bin_cmd!("sqlx")
+            .args(["database", "setup", "--no-lock"])
+            .args(["--database-url", &db.connection_string()])
+            .args(["--source", "tests/migrations_reversible"])
+            .assert()
+            .success();
+        assert_eq!(db.applied_migrations().await, all_migrations);
+    }
+}
+
+/// Regression test for #4487: concurrent `sqlx migrate run` invocations must not race.
+///
+/// The first invocation holds the database lock while it applies migrations, so the second
+/// has to wait and then observe that everything was already applied instead of trying to
+/// apply the same migrations again.
+///
+/// Only runs when `SQLX_CLI_TEST_POSTGRES_URL` points at a Postgres server, e.g.
+/// `postgres://postgres:password@localhost`; SQLite's `lock()` is a no-op so it can't
+/// exercise this behavior.
+#[tokio::test]
+async fn concurrent_run_waits_for_lock() {
+    let Some(base_url) = std::env::var("SQLX_CLI_TEST_POSTGRES_URL").ok() else {
+        eprintln!("skipping: SQLX_CLI_TEST_POSTGRES_URL is not set");
+        return;
+    };
+
+    let db_name = format!("sqlx_cli_lock_test_{}", std::process::id());
+    let db_url = format!("{base_url}/{db_name}");
+
+    // A slow migration makes the race deterministic: without locking, the second
+    // invocation starts applying it while the first is still sleeping.
+    let migrations = tempfile::tempdir().unwrap();
+    std::fs::write(
+        migrations.path().join("0001_slow.sql"),
+        "SELECT pg_sleep(1);\nCREATE TABLE sqlx_cli_lock_test (x INTEGER PRIMARY KEY);\n",
+    )
+    .unwrap();
+
+    let sqlx = assert_cmd::cargo::cargo_bin("sqlx");
+
+    // Clean up any leftover database from a previous run.
+    let _ = std::process::Command::new(&sqlx)
+        .args(["database", "drop", "-y", "--database-url", &db_url])
+        .status();
+
+    let create = std::process::Command::new(&sqlx)
+        .args(["database", "create", "--database-url", &db_url])
+        .status()
+        .unwrap();
+    assert!(create.success(), "failed to create {db_name}");
+
+    let spawn = || {
+        std::process::Command::new(&sqlx)
+            .args(["migrate", "run", "--database-url", &db_url, "--source"])
+            .arg(migrations.path())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap()
+    };
+
+    let first = spawn();
+    // Give the first invocation a head start, so it's likely to be the one holding the lock.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let second = spawn();
+
+    let (first, second) = tokio::task::spawn_blocking(move || {
+        (
+            first.wait_with_output().unwrap(),
+            second.wait_with_output().unwrap(),
+        )
+    })
+    .await
+    .unwrap();
+
+    let _ = std::process::Command::new(&sqlx)
+        .args(["database", "drop", "-y", "--database-url", &db_url])
+        .status();
+
+    let output = |out: &std::process::Output| {
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    };
+
+    // Both invocations must succeed; without the lock, the one that loses the race fails
+    // with a "relation already exists" error from the migration SQL.
+    assert!(
+        first.status.success(),
+        "first migration run failed: {}",
+        output(&first)
+    );
+    assert!(
+        second.status.success(),
+        "second migration run failed (it should have waited for the lock): {}",
+        output(&second)
+    );
+
+    // Whichever invocation acquired the lock first applies the migration; the other one
+    // waits for the lock and then finds nothing left to do.
+    let applied = [output(&first), output(&second)]
+        .iter()
+        .filter(|out| out.contains("Applied 1/"))
+        .count();
+    assert_eq!(
+        applied,
+        1,
+        "exactly one invocation should have applied the migration; first: {:?}, second: {:?}",
+        output(&first),
+        output(&second)
+    );
 }

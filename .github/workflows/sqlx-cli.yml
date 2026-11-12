@@ -153,6 +153,8 @@ jobs:
           POSTGRES_PASSWORD: password
     env:
       BASE_URL: postgres://postgres:password@localhost
+      # Enables the `concurrent_run_waits_for_lock` integration test.
+      SQLX_CLI_TEST_POSTGRES_URL: postgres://postgres:password@localhost
     timeout-minutes: 30
 
     steps:
@@ -166,6 +168,9 @@ jobs:
       - name: Install SQLx-CLI
         run:
           cargo install --locked --debug --path sqlx-cli
+
+      - name: Test Migration Locking
+        run: cargo test --manifest-path sqlx-cli/Cargo.toml --test migrate concurrent_run_waits_for_lock
 
       - name: Basic Test
         env:

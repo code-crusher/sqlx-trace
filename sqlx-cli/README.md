@@ -69,6 +69,13 @@ sqlx migrate run
 Compares the migration history of the running database against the `migrations/` folder and runs
 any scripts that are still pending.
 
+Like `sqlx::migrate!()`, this acquires a database lock before reading the migration state, so
+concurrent invocations against the same database are safe: one runs the migrations while the
+others wait, then re-read the state and find nothing left to do.
+
+Pass `--no-lock` to skip the lock. Only do this if your database doesn't support advisory locks
+(e.g. CockroachDB), since concurrent migrations may then race and corrupt the database.
+
 ---
 
 Users can provide the directory for the migration scripts to `sqlx migrate` subcommands with the `--source` flag.

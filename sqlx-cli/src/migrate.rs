@@ -213,6 +213,7 @@ fn validate_applied_migrations(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     config: &Config,
     migration_source: &MigrationSourceOpt,
@@ -221,6 +222,7 @@ pub async fn run(
     ignore_missing: bool,
     target_version: Option<i64>,
     skip: bool,
+    no_lock: bool,
 ) -> anyhow::Result<()> {
     let migrator = migration_source.resolve(config).await?;
 
@@ -231,6 +233,16 @@ pub async fn run(
     }
 
     let mut conn = crate::connect(config, connect_opts).await?;
+
+    // A dry run doesn't modify anything, so it doesn't need the lock.
+    let locking = !dry_run && !no_lock;
+
+    // Lock the database for exclusive access, same as `Migrator::run()`.
+    // This is done before reading migration state so that we observe the results
+    // of any migration that was applied while we were waiting for the lock.
+    if locking {
+        conn.lock().await?;
+    }
 
     for schema_name in &config.migrate.create_schemas {
         conn.create_schema_if_not_exists(schema_name).await?;
@@ -311,6 +323,12 @@ pub async fn run(
         }
     }
 
+    // Unlock before closing so other migrators can proceed even if closing the connection
+    // takes a while, and so the lock isn't left dangling if `close()` fails.
+    if locking {
+        conn.unlock().await?;
+    }
+
     // Close the connection before exiting:
     // * For MySQL and Postgres this should ensure timely cleanup on the server side,
     //   including decrementing the open connection count.
@@ -328,6 +346,7 @@ pub async fn revert(
     dry_run: bool,
     ignore_missing: bool,
     target_version: Option<i64>,
+    no_lock: bool,
 ) -> anyhow::Result<()> {
     let migrator = migration_source.resolve(config).await?;
 
@@ -338,6 +357,16 @@ pub async fn revert(
     }
 
     let mut conn = crate::connect(config, connect_opts).await?;
+
+    // A dry run doesn't modify anything, so it doesn't need the lock.
+    let locking = !dry_run && !no_lock;
+
+    // Lock the database for exclusive access, same as `Migrator::undo()`.
+    // This is done before reading migration state so that we observe the results
+    // of any migration that ran while we were waiting for the lock.
+    if locking {
+        conn.lock().await?;
+    }
 
     // FIXME: we should not be creating anything here if it doesn't exist
     for schema_name in &config.migrate.create_schemas {
@@ -418,6 +447,10 @@ pub async fn revert(
     }
     if !is_applied {
         println!("No migrations available to revert");
+    }
+
+    if locking {
+        conn.unlock().await?;
     }
 
     let _ = conn.close().await;
