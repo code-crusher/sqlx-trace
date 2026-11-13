@@ -24,11 +24,19 @@ impl TransactionManager for MySqlTransactionManager {
             Some(statement) => statement,
             None => begin_ansi_transaction_sql(depth),
         };
+        // Claim the depth before the round trip, not after. `start_rollback` -- which both
+        // `Transaction`'s drop guard and the pool's release path call -- is a no-op while
+        // the depth is zero, so a future cancelled during the await below would otherwise
+        // leave the server in a transaction with nothing queued to end it. `Pool` then
+        // hands that connection to the next borrower, whose autocommit statements silently
+        // run inside it (and are rolled back when the connection eventually closes).
+        // Unwound just below if the BEGIN did not take.
+        conn.inner.transaction_depth += 1;
         conn.execute(statement).await?;
         if !conn.in_transaction() {
+            conn.inner.transaction_depth -= 1;
             return Err(Error::BeginFailed);
         }
-        conn.inner.transaction_depth += 1;
 
         Ok(())
     }

@@ -804,3 +804,65 @@ async fn test_client_found_rows() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+// Regression: a future cancelled while `BEGIN`'s round trip is in flight used to leave the
+// session inside a transaction. `start_rollback` is a no-op while `transaction_depth` is
+// zero, and the depth was raised only after the await, so neither drop guard queued a
+// `ROLLBACK` -- and `return_to_pool` validates with `wait_until_ready`, which drains the
+// server's answer without inspecting its status flags, so the connection was handed to the
+// next borrower with the transaction still open.
+//
+// https://github.com/launchbadge/sqlx/issues/4467
+#[sqlx_macros::test]
+async fn it_rolls_back_a_transaction_cancelled_during_begin_issue_4467() -> anyhow::Result<()> {
+    use std::time::Duration;
+
+    use sqlx_core::rt::timeout;
+    use sqlx_core::sql_str::AssertSqlSafe;
+
+    let pool = MySqlPoolOptions::new()
+        .max_connections(1)
+        .connect(&std::env::var("DATABASE_URL")?)
+        .await?;
+
+    let mut other = new::<MySql>().await?;
+    sqlx::query("DROP TABLE IF EXISTS test_issue_4467")
+        .execute(&mut other)
+        .await?;
+    sqlx::query("CREATE TABLE test_issue_4467 (id INT PRIMARY KEY)")
+        .execute(&mut other)
+        .await?;
+
+    // A plain `BEGIN` answers too quickly to cancel reliably; the sleep widens the same
+    // round trip so the cancellation lands inside it.
+    let cancelled = timeout(
+        Duration::from_millis(300),
+        pool.begin_with(AssertSqlSafe("BEGIN; SELECT SLEEP(2);".to_string())),
+    )
+    .await;
+    assert!(cancelled.is_err(), "the begin should not have completed");
+
+    // Outlast the sleep: the queued `ROLLBACK` is only flushed once the abandoned statement
+    // has answered and the connection is on its way back to the pool.
+    sqlx_core::rt::sleep(Duration::from_millis(3500)).await;
+
+    // The connection returns to autocommit once the pool releases it, so this autocommit
+    // insert must actually commit and be visible to other sessions.
+    sqlx::query("INSERT INTO test_issue_4467 VALUES (1)")
+        .execute(&pool)
+        .await?;
+
+    let visible: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM test_issue_4467")
+        .fetch_one(&mut other)
+        .await?;
+    assert_eq!(
+        visible, 1,
+        "autocommit insert ran inside the stale transaction and was rolled back"
+    );
+
+    sqlx::query("DROP TABLE test_issue_4467")
+        .execute(&mut other)
+        .await?;
+
+    Ok(())
+}
