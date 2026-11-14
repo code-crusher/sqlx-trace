@@ -4,7 +4,7 @@ use sqlx::mysql::{MySql, MySqlConnection, MySqlPool, MySqlPoolOptions, MySqlRow}
 use sqlx::{Column, Connection, Executor, Row, SqlSafeStr, Statement, TypeInfo};
 use sqlx_core::connection::ConnectOptions;
 use sqlx_core::types::Type;
-use sqlx_mysql::MySqlConnectOptions;
+use sqlx_mysql::{MySqlConnectOptions, MySqlDatabaseError};
 use sqlx_test::{new, setup_if_needed};
 use std::env;
 use url::Url;
@@ -801,6 +801,53 @@ async fn test_client_found_rows() -> anyhow::Result<()> {
     assert_eq!(result.rows_affected(), 2);
 
     tx.rollback().await?;
+
+    Ok(())
+}
+
+#[sqlx_macros::test]
+async fn test_client_ignore_space() -> anyhow::Result<()> {
+    setup_if_needed();
+
+    let url = url::Url::parse(&env::var("DATABASE_URL")?)?;
+
+    // CLIENT_IGNORE_SPACE unspecified = true by default.
+    let mut conn = MySqlConnectOptions::from_url(&url)?.connect().await?;
+
+    // With CLIENT_IGNORE_SPACE set, a space between the function name
+    // and the opening parenthesis is allowed.
+    let row: (i64,) = sqlx::query_as("SELECT COUNT (*)")
+        .fetch_one(&mut conn)
+        .await?;
+    assert_eq!(row.0, 1);
+
+    conn.close().await?;
+
+    // Explicitly unset CLIENT_IGNORE_SPACE: the server no longer tolerates
+    // the space and rejects the query as a syntax error.
+    let mut conn = MySqlConnectOptions::from_url(&url)?
+        .ignore_space(false)
+        .connect()
+        .await?;
+
+    let err = sqlx::query("SELECT COUNT (*)")
+        .fetch_one(&mut conn)
+        .await
+        .unwrap_err();
+
+    let db_err = err.into_database_error().expect("expected a database error");
+    let db_err = db_err
+        .try_downcast_ref::<MySqlDatabaseError>()
+        .expect("expected a MySQL error");
+    assert_eq!(db_err.number(), 1064);
+
+    // Without the flag, the usual spelling works fine.
+    let row: (i64,) = sqlx::query_as("SELECT COUNT(*)")
+        .fetch_one(&mut conn)
+        .await?;
+    assert_eq!(row.0, 1);
+
+    conn.close().await?;
 
     Ok(())
 }

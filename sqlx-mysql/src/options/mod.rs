@@ -83,6 +83,7 @@ pub struct MySqlConnectOptions {
     pub(crate) timezone: Option<String>,
     pub(crate) set_names: bool,
     pub(crate) found_rows: bool,
+    pub(crate) ignore_space: bool,
 }
 
 impl Default for MySqlConnectOptions {
@@ -128,6 +129,7 @@ impl MySqlConnectOptions {
             timezone: Some(String::from("+00:00")),
             set_names: true,
             found_rows: true,
+            ignore_space: true,
         }
     }
 
@@ -464,6 +466,26 @@ impl MySqlConnectOptions {
     /// The default value is set to true.
     pub fn found_rows(mut self, flag_val: bool) -> Self {
         self.found_rows = flag_val;
+        self
+    }
+
+    /// Sets the flag that enables or disables CLIENT_IGNORE_SPACE.
+    ///
+    /// When enabled, the server allows whitespace between a function name and
+    /// the opening parenthesis, e.g. `COUNT (*)` is parsed as a call to
+    /// `COUNT`. Note this also makes function names reserved words, so they
+    /// must be quoted when used as identifiers. Disabling it matches the
+    /// behavior of most other MySQL clients (libmysqlclient, Trilogy, ...),
+    /// which leave this flag off, and can be required for connection poolers
+    /// like ProxySQL that only match backends on equal client flags.
+    ///
+    /// Turning this off changes how the server parses a function name
+    /// followed by a space: `COUNT (*)` becomes a syntax error and must be
+    /// written `COUNT(*)`.
+    ///
+    /// The default value is set to true.
+    pub fn ignore_space(mut self, flag_val: bool) -> Self {
+        self.ignore_space = flag_val;
         self
     }
 }
