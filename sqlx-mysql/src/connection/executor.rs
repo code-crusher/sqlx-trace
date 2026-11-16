@@ -1,14 +1,12 @@
 use super::MySqlStream;
-use crate::connection::stream::Waiting;
+use crate::connection::stream::{PrepareState, PrepareStep, Waiting};
 use crate::error::Error;
 use crate::executor::{Execute, Executor};
 use crate::ext::ustr::UStr;
 use crate::io::MySqlBufExt;
 use crate::logger::QueryLogger;
 use crate::protocol::response::Status;
-use crate::protocol::statement::{
-    BinaryRow, Execute as StatementExecute, Prepare, PrepareOk, StmtClose,
-};
+use crate::protocol::statement::{BinaryRow, Execute as StatementExecute, Prepare, StmtClose};
 use crate::protocol::text::{ColumnDefinition, Query, TextRow};
 use crate::statement::{MySqlStatement, MySqlStatementMetadata};
 use crate::HashMap;
@@ -33,42 +31,97 @@ impl MySqlConnection {
         // https://dev.mysql.com/doc/internals/en/com-stmt-prepare.html
         // https://dev.mysql.com/doc/internals/en/com-stmt-prepare-response.html#packet-COM_STMT_PREPARE_OK
 
+        // Track the response in the connection's `waiting` queue *before*
+        // sending the request, so a cancellation anywhere in between leaves
+        // the packets accounted for and the next command on this connection
+        // can wait for them instead of reading them as its own response.
+        self.inner
+            .stream
+            .waiting
+            .push_back(Waiting::Prepare(PrepareState::new()));
+
+        // If the send fails, keep the tracking entry: some of the packet may
+        // have been written already, and the rest is still in the write
+        // buffer. The next `wait_until_ready` flushes that buffer, the server
+        // then completes the prepare, and the response is drained as such
+        // instead of being misread as the next command's response. If the
+        // connection is actually broken the drain just fails with the same
+        // IO error.
         self.inner
             .stream
             .send_packet(Prepare { query: sql })
             .await?;
 
-        let ok: PrepareOk = self.inner.stream.recv().await?;
-
         // the parameter definitions are very unreliable so we skip over them
         // as we have little use
-
-        if ok.params > 0 {
-            for _ in 0..ok.params {
-                let _def: ColumnDefinition = self.inner.stream.recv().await?;
-            }
-
-            self.inner.stream.maybe_recv_eof().await?;
-        }
 
         // the column definitions are berefit the type information from the
         // to-be-bound parameters; we will receive the output column definitions
         // once more on execute so we wait for that
 
         let mut columns = Vec::new();
+        let mut column_names = HashMap::new();
+        let mut parameters = 0;
+        let mut statement_id = None;
 
-        let column_names = if ok.columns > 0 {
-            recv_result_metadata(&mut self.inner.stream, ok.columns as usize, &mut columns).await?
-        } else {
-            Default::default()
-        };
+        loop {
+            match self.inner.stream.recv_prepare_step().await {
+                Ok(PrepareStep::Ok {
+                    statement_id: id,
+                    params,
+                    ..
+                }) => {
+                    statement_id = Some(id);
+                    parameters = params as usize;
+                }
 
-        let id = ok.statement_id;
+                Ok(PrepareStep::Parameter) => {
+                    // the parameter definitions are very unreliable so we skip over them
+                }
+
+                Ok(PrepareStep::Column(def)) => {
+                    let ordinal = columns.len();
+                    let column = recv_next_result_column(&def, ordinal)?;
+                    column_names.insert(column.name.clone(), ordinal);
+                    columns.push(column);
+                }
+
+                Ok(PrepareStep::Eof) => {}
+
+                Ok(PrepareStep::Done(_)) => break,
+
+                Err(error) => {
+                    // `recv_prepare_step` discarded the tracking entry; if a statement
+                    // was allocated before the error it must be closed so the server
+                    // does not leak it. The remaining packets, if any, cannot be
+                    // trusted to be in sync with us anymore, so the connection is
+                    // left to error out on the next command.
+                    if let Some(id) = statement_id {
+                        let _ = self
+                            .inner
+                            .stream
+                            .send_packet(StmtClose { statement: id })
+                            .await;
+                    }
+
+                    return Err(error);
+                }
+            }
+        }
+
+        // the response is fully consumed; `recv_prepare_step` takes the tracking
+        // entry out of `waiting` when it reports the final packet, so nothing to
+        // clean up here
         let metadata = MySqlStatementMetadata {
-            parameters: ok.params as usize,
+            parameters,
             columns: Arc::new(columns),
             column_names: Arc::new(column_names),
         };
+
+        // receiving `Done` implies the server sent a COM_STMT_PREPARE_OK packet,
+        // so the id must have been set
+        let id =
+            statement_id.expect("prepare response finished without a COM_STMT_PREPARE_OK packet");
 
         Ok((id, metadata))
     }
@@ -110,7 +163,6 @@ impl MySqlConnection {
         let mut logger = QueryLogger::new(sql, self.inner.log_settings.clone());
 
         self.inner.stream.wait_until_ready().await?;
-        self.inner.stream.waiting.push_back(Waiting::Result);
 
         Ok(try_stream! {
         let sql = logger.sql().as_str();
@@ -151,6 +203,14 @@ impl MySqlConnection {
                         .await?;
 
                     if arguments.types.len() != metadata.parameters {
+                        // the statement was prepared but will never be used;
+                        // close it so it doesn't leak on the server
+                        let _ = self
+                            .inner
+                            .stream
+                            .send_packet(StmtClose { statement: id })
+                            .await;
+
                         return Err(
                             err_protocol!(
                                 "prepared statement expected {} parameters but {} parameters were provided",
@@ -178,6 +238,11 @@ impl MySqlConnection {
 
                 MySqlValueFormat::Text
             };
+
+            // queue the slot for the response of the command that was just
+            // sent so that a cancelled or failing command above this point
+            // cannot leave a stray entry behind
+            self.inner.stream.waiting.push_back(Waiting::Result);
 
             loop {
                 // query response is a meta-packet which may be one of:

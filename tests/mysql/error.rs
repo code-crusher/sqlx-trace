@@ -174,3 +174,46 @@ async fn it_fails_with_parameter_count_mismatch_zero_expected() -> anyhow::Resul
 
     Ok(())
 }
+
+#[sqlx_macros::test]
+async fn it_can_reuse_connection_after_cancelled_prepare() -> anyhow::Result<()> {
+    // the query is polled once, which sends COM_STMT_PREPARE, and then
+    // dropped before the response is read; the packets belonging to the
+    // prepare response must not be mistaken for the response to the next
+    // command issued on this connection
+    let mut conn = new::<MySql>().await?;
+
+    for _ in 0..10 {
+        tokio::select! {
+            biased;
+            res = sqlx::query("SELECT ? AS a, 'b' AS b, 'c' AS c, 'd' AS d")
+                .bind(1_i64)
+                .fetch_all(&mut conn) => {
+                res?;
+            }
+            _ = std::future::ready(()) => {}
+        }
+
+        conn.ping().await?;
+    }
+
+    Ok(())
+}
+
+#[sqlx_macros::test]
+async fn it_can_reuse_connection_after_parameter_count_mismatch() -> anyhow::Result<()> {
+    let mut conn = new::<MySql>().await?;
+
+    let res: Result<_, sqlx::Error> = sqlx::query("SELECT ?")
+        .bind(1_i64)
+        .bind(2_i64)
+        .execute(&mut conn)
+        .await;
+
+    let err = res.unwrap_err();
+    assert!(matches!(err, Error::Protocol(_)), "{err}");
+
+    conn.ping().await?;
+
+    Ok(())
+}
