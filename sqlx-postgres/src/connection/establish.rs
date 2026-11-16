@@ -4,8 +4,10 @@ use crate::common::StatementCache;
 use crate::connection::{sasl, stream::PgStream};
 use crate::error::Error;
 use crate::io::StatementId;
+#[cfg(feature = "password-auth")]
+use crate::message::Password;
 use crate::message::{
-    Authentication, BackendKeyData, BackendMessageFormat, Password, ReadyForQuery, Startup,
+    Authentication, BackendKeyData, BackendMessageFormat, ReadyForQuery, Startup,
 };
 use crate::{PgConnectOptions, PgConnection};
 
@@ -71,6 +73,7 @@ impl PgConnection {
                         // do nothing; no more information is required to continue
                     }
 
+                    #[cfg(feature = "password-auth")]
                     Authentication::CleartextPassword => {
                         // The frontend must now send a [PasswordMessage] containing the
                         // password in clear-text form.
@@ -82,6 +85,7 @@ impl PgConnection {
                             .await?;
                     }
 
+                    #[cfg(feature = "password-auth")]
                     Authentication::Md5Password(body) => {
                         // The frontend must now send a [PasswordMessage] containing the
                         // password (with user name) encrypted via MD5, then encrypted again
@@ -95,6 +99,15 @@ impl PgConnection {
                                 salt: body.salt,
                             })
                             .await?;
+                    }
+
+                    #[cfg(not(feature = "password-auth"))]
+                    Authentication::CleartextPassword | Authentication::Md5Password(_) => {
+                        return Err(Error::Configuration(
+                            "password authentication is not available: \
+                             sqlx-postgres was built without the `password-auth` feature"
+                                .into(),
+                        ));
                     }
 
                     Authentication::Sasl(body) => {

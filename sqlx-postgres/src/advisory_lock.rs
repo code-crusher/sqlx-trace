@@ -1,7 +1,9 @@
 use crate::error::Result;
 use crate::Either;
 use crate::PgConnection;
+#[cfg(feature = "advisory-lock-hashing")]
 use hkdf::Hkdf;
+#[cfg(feature = "advisory-lock-hashing")]
 use sha2::Sha256;
 use sqlx_core::executor::Executor;
 use sqlx_core::sql_str::SqlSafeStr;
@@ -60,8 +62,8 @@ pub struct PgAdvisoryLock {
 pub enum PgAdvisoryLockKey {
     /// The keyspace designated by a single 64-bit integer.
     ///
-    /// When [PgAdvisoryLock] is constructed with [::new()][PgAdvisoryLock::new()],
-    /// this is the keyspace used.
+    /// When [PgAdvisoryLock] is constructed with [::new()][PgAdvisoryLock::new()]
+    /// (requires the `advisory-lock-hashing` feature), this is the keyspace used.
     BigInt(i64),
     /// The keyspace designated by two 32-bit integers.
     IntPair(i32, i32),
@@ -85,6 +87,7 @@ pub struct PgAdvisoryLockGuard<C: AsMut<PgConnection>> {
     conn: Option<C>,
 }
 
+#[cfg(feature = "advisory-lock-hashing")]
 impl PgAdvisoryLock {
     /// Construct a `PgAdvisoryLock` using the given string as a key.
     ///
@@ -98,6 +101,11 @@ impl PgAdvisoryLock {
     /// to collide with any similar implementations (although we don't currently know of any).
     /// See the source of this method for details.
     ///
+    /// This constructor is only available with the `advisory-lock-hashing` feature
+    /// (enabled by default). Disable the feature to avoid compiling the `hkdf` and `sha2`
+    /// crates, e.g. for FIPS-oriented builds; in that case, use
+    /// [`PgAdvisoryLock::with_key()`] instead.
+    ///
     /// [hkdf]: https://datatracker.ietf.org/doc/html/rfc5869
     /// ### Example
     /// ```rust
@@ -108,6 +116,7 @@ impl PgAdvisoryLock {
     /// // See the documentation for the `pg_locks` system view for details.
     /// assert_eq!(lock.key(), &PgAdvisoryLockKey::BigInt(-5560419505042474287));
     /// ```
+    #[cfg_attr(docsrs, doc(cfg(feature = "advisory-lock-hashing")))]
     pub fn new(key_string: impl AsRef<str>) -> Self {
         let input_key_material = key_string.as_ref();
 
@@ -161,8 +170,12 @@ impl PgAdvisoryLock {
 
         Self::with_key(key)
     }
+}
 
+impl PgAdvisoryLock {
     /// Construct a `PgAdvisoryLock` with a manually supplied key.
+    ///
+    /// This is always available, including without the `advisory-lock-hashing` feature.
     pub fn with_key(key: PgAdvisoryLockKey) -> Self {
         Self {
             key,
@@ -431,5 +444,40 @@ impl<C: AsMut<PgConnection>> Drop for PgAdvisoryLockGuard<C> {
                 .queue_simple_query(self.lock.get_release_query())
                 .expect("BUG: PgAdvisoryLock::get_release_query() somehow too long for protocol");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn with_key_bigint() {
+        let lock = PgAdvisoryLock::with_key(PgAdvisoryLockKey::BigInt(42));
+        assert_eq!(lock.key(), &PgAdvisoryLockKey::BigInt(42));
+    }
+
+    #[test]
+    fn with_key_int_pair() {
+        let lock = PgAdvisoryLock::with_key(PgAdvisoryLockKey::IntPair(-1, 2));
+        assert_eq!(lock.key(), &PgAdvisoryLockKey::IntPair(-1, 2));
+    }
+
+    #[cfg(feature = "advisory-lock-hashing")]
+    #[test]
+    fn new_is_stable() {
+        // The derived key must remain stable across releases, as it is documented.
+        let lock = PgAdvisoryLock::new("my first Postgres advisory lock!");
+        assert_eq!(lock.key(), &PgAdvisoryLockKey::BigInt(-5560419505042474287));
+    }
+
+    #[cfg(feature = "advisory-lock-hashing")]
+    #[test]
+    fn new_int_pair_is_not_produced() {
+        // `new()` always uses the 64-bit keyspace.
+        assert!(matches!(
+            PgAdvisoryLock::new("anything").key(),
+            PgAdvisoryLockKey::BigInt(_)
+        ));
     }
 }

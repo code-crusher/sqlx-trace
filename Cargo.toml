@@ -120,7 +120,15 @@ _sqlite = []
 
 # database
 any = ["sqlx-core/any", "sqlx-mysql?/any", "sqlx-postgres?/any", "sqlx-sqlite?/any"]
-postgres = ["sqlx-postgres", "sqlx-macros?/postgres"]
+postgres = ["sqlx-postgres", "postgres-advisory-lock-hashing", "postgres-password-auth", "sqlx-macros?/postgres"]
+# Enables `PgAdvisoryLock::new(string)`, which derives the advisory-lock key
+# from the string with HKDF-SHA-256. Disabling this removes the `hkdf` and
+# `sha2` dependencies; `PgAdvisoryLock::with_key(i64)` is always available.
+postgres-advisory-lock-hashing = ["sqlx-postgres/advisory-lock-hashing"]
+# Enables password-based authentication (cleartext, MD5 and SCRAM-SHA-256)
+# for Postgres. Disabling this removes the `md-5`, `hmac`, `sha2`, `rand` and
+# `stringprep` dependencies.
+postgres-password-auth = ["sqlx-postgres/password-auth"]
 mysql = ["sqlx-mysql", "sqlx-macros?/mysql"]
 mysql-rsa = ["mysql", "sqlx-mysql/rsa", "sqlx-macros?/mysql-rsa"]
 sqlite = ["sqlite-bundled", "sqlite-deserialize", "sqlite-load-extension", "sqlite-unlock-notify"]
@@ -172,7 +180,7 @@ sqlx-macros = { version = "=0.9.0", path = "sqlx-macros" }
 
 # Driver crates
 sqlx-mysql = { version = "=0.9.0", path = "sqlx-mysql", default-features = false }
-sqlx-postgres = { version = "=0.9.0", path = "sqlx-postgres" }
+sqlx-postgres = { version = "=0.9.0", path = "sqlx-postgres", default-features = false }
 sqlx-sqlite = { version = "=0.9.0", path = "sqlx-sqlite" }
 
 # Facade crate (for reference from sqlx-cli)
@@ -230,7 +238,7 @@ sqlx-core = { workspace = true, features = ["migrate"] }
 sqlx-macros = { workspace = true, optional = true }
 
 sqlx-mysql = { workspace = true, optional = true, default-features = false }
-sqlx-postgres = { workspace = true, optional = true }
+sqlx-postgres = { workspace = true, optional = true, default-features = false }
 sqlx-sqlite = { workspace = true, optional = true }
 
 [dev-dependencies]

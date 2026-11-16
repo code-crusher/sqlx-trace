@@ -3,11 +3,13 @@ use crate::message::{FrontendMessage, FrontendMessageFormat};
 use sqlx_core::Error;
 use std::num::Saturating;
 
+#[cfg_attr(not(feature = "password-auth"), allow(dead_code))]
 pub struct SaslInitialResponse<'a> {
     pub response: &'a str,
     pub plus: bool,
 }
 
+#[cfg_attr(not(feature = "password-auth"), allow(dead_code))]
 impl SaslInitialResponse<'_> {
     #[inline(always)]
     fn selected_mechanism(&self) -> &'static str {
@@ -19,6 +21,7 @@ impl SaslInitialResponse<'_> {
     }
 }
 
+#[cfg_attr(not(feature = "password-auth"), allow(dead_code))]
 impl FrontendMessage for SaslInitialResponse<'_> {
     const FORMAT: FrontendMessageFormat = FrontendMessageFormat::PasswordPolymorphic;
 
@@ -53,8 +56,10 @@ impl FrontendMessage for SaslInitialResponse<'_> {
     }
 }
 
+#[cfg_attr(not(feature = "password-auth"), allow(dead_code))]
 pub struct SaslResponse<'a>(pub &'a str);
 
+#[cfg_attr(not(feature = "password-auth"), allow(dead_code))]
 impl FrontendMessage for SaslResponse<'_> {
     const FORMAT: FrontendMessageFormat = FrontendMessageFormat::PasswordPolymorphic;
 

@@ -34,6 +34,7 @@ pub enum Authentication {
     /// The frontend must now send a [PasswordMessage] containing the
     /// password (with user name) encrypted via MD5, then encrypted
     /// again using the 4-byte random salt.
+    #[cfg_attr(not(feature = "password-auth"), allow(dead_code))]
     Md5Password(AuthenticationMd5Password),
 
     /// The frontend must now initiate a SASL negotiation,
@@ -50,6 +51,7 @@ pub enum Authentication {
     /// This message contains challenge data from the previous step of SASL negotiation.
     ///
     /// The frontend must respond with a [SaslResponse] message.
+    #[cfg_attr(not(feature = "password-auth"), allow(dead_code))]
     SaslContinue(AuthenticationSaslContinue),
 
     /// SASL authentication has completed with additional mechanism-specific
@@ -57,6 +59,7 @@ pub enum Authentication {
     ///
     /// The server will next send [Authentication::Ok] to
     /// indicate successful authentication.
+    #[cfg_attr(not(feature = "password-auth"), allow(dead_code))]
     SaslFinal(AuthenticationSaslFinal),
 }
 
@@ -89,14 +92,17 @@ impl BackendMessage for Authentication {
 
 /// Body of [Authentication::Md5Password].
 #[derive(Debug)]
+#[cfg_attr(not(feature = "password-auth"), allow(dead_code))]
 pub struct AuthenticationMd5Password {
     pub salt: [u8; 4],
 }
 
 /// Body of [Authentication::Sasl].
 #[derive(Debug)]
+#[cfg_attr(not(feature = "password-auth"), allow(dead_code))]
 pub struct AuthenticationSasl(Bytes);
 
+#[cfg_attr(not(feature = "password-auth"), allow(dead_code))]
 impl AuthenticationSasl {
     #[inline]
     pub fn mechanisms(&self) -> SaslMechanisms<'_> {
@@ -105,8 +111,10 @@ impl AuthenticationSasl {
 }
 
 /// An iterator over the SASL authentication mechanisms provided by the server.
+#[cfg_attr(not(feature = "password-auth"), allow(dead_code))]
 pub struct SaslMechanisms<'a>(&'a [u8]);
 
+#[cfg_attr(not(feature = "password-auth"), allow(dead_code))]
 impl<'a> Iterator for SaslMechanisms<'a> {
     type Item = &'a str;
 
@@ -124,6 +132,7 @@ impl<'a> Iterator for SaslMechanisms<'a> {
 }
 
 #[derive(Debug)]
+#[cfg_attr(not(feature = "password-auth"), allow(dead_code))]
 pub struct AuthenticationSaslContinue {
     pub salt: Vec<u8>,
     pub iterations: u32,
@@ -171,6 +180,7 @@ impl ProtocolDecode<'_> for AuthenticationSaslContinue {
 }
 
 #[derive(Debug)]
+#[cfg_attr(not(feature = "password-auth"), allow(dead_code))]
 pub struct AuthenticationSaslFinal {
     pub verifier: Vec<u8>,
 }

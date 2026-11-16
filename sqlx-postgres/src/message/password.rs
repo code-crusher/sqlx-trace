@@ -82,7 +82,7 @@ impl FrontendMessage for Password<'_> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "password-auth"))]
 mod tests {
     use crate::message::FrontendMessage;
 
