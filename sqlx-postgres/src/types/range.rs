@@ -7,7 +7,7 @@ use sqlx_core::bytes::Buf;
 use crate::decode::Decode;
 use crate::encode::{Encode, IsNull};
 use crate::error::BoxDynError;
-use crate::type_info::PgTypeKind;
+use crate::type_info::{PgType, PgTypeKind};
 use crate::types::Type;
 use crate::{PgArgumentBuffer, PgHasArrayType, PgTypeInfo, PgValueFormat, PgValueRef, Postgres};
 
@@ -30,6 +30,68 @@ bitflags! {
 pub struct PgRange<T> {
     pub start: Bound<T>,
     pub end: Bound<T>,
+}
+
+/// Provides information necessary to encode and decode Postgres ranges as compatible Rust types.
+///
+/// This is the analogue of [`PgHasArrayType`][crate::PgHasArrayType] for range types.
+/// Implementing this trait for some type `T` enables the `Type`, `Encode` and `Decode` impls
+/// for `PgRange<T>`, as well as the `PgHasArrayType` impl for `PgRange<T>`.
+///
+/// It is implemented for the element types of the built-in range types:
+/// `i32` (`int4range`), `i64` (`int8range`), `BigDecimal`/`Decimal` (`numrange`),
+/// `NaiveDate`/`time::Date` (`daterange`), `NaiveDateTime`/`time::PrimitiveDateTime` (`tsrange`)
+/// and `DateTime<Tz>`/`time::OffsetDateTime` (`tstzrange`).
+///
+/// Additionally, this trait may be implemented for your own types to use `PgRange`
+/// with a user-defined range type, e.g. one created with
+///
+/// ```sql
+/// CREATE TYPE float_range AS RANGE (subtype = float8, subtype_diff = float8mi);
+/// ```
+///
+/// For instance, to use `PgRange<FloatRange>` where `FloatRange` is a newtype around `f64`:
+///
+/// ```rust,ignore
+/// #[derive(Debug, Clone, Copy, PartialEq, sqlx::Type, sqlx::Encode, sqlx::Decode)]
+/// #[sqlx(transparent)]
+/// struct FloatRange(f64);
+///
+/// impl PgHasRangeType for FloatRange {
+///     fn range_type_info() -> PgTypeInfo {
+///         PgTypeInfo::with_name("float_range")
+///     }
+///
+///     fn range_array_type_info() -> PgTypeInfo {
+///         PgTypeInfo::array_of("float_range")
+///     }
+/// }
+/// ```
+///
+/// The default implementation of `range_compatible()` requires the Postgres type to be a range
+/// whose element type is compatible with `T`. Implementations that want to restrict the
+/// accepted range type further may override it.
+///
+/// [`PgHasArrayType`]: crate::PgHasArrayType
+pub trait PgHasRangeType {
+    /// The range type for which `Self` is the element type.
+    fn range_type_info() -> PgTypeInfo;
+
+    /// The array type of the range returned by [`range_type_info()`](Self::range_type_info).
+    fn range_array_type_info() -> PgTypeInfo;
+
+    fn range_compatible(ty: &PgTypeInfo) -> bool
+    where
+        Self: Type<Postgres>,
+    {
+        // we require the declared type to be a _range_ with an
+        // element type that is acceptable
+        if let PgTypeKind::Range(element) = &ty.kind() {
+            return <Self as Type<Postgres>>::compatible(element);
+        }
+
+        false
+    }
 }
 
 impl<T> From<[Bound<T>; 2]> for PgRange<T> {
@@ -112,179 +174,25 @@ impl<T> RangeBounds<T> for PgRange<T> {
     }
 }
 
-impl Type<Postgres> for PgRange<i32> {
+impl<T> Type<Postgres> for PgRange<T>
+where
+    T: PgHasRangeType + Type<Postgres>,
+{
     fn type_info() -> PgTypeInfo {
-        PgTypeInfo::INT4_RANGE
+        <T as PgHasRangeType>::range_type_info()
     }
 
     fn compatible(ty: &PgTypeInfo) -> bool {
-        range_compatible::<i32>(ty)
+        <T as PgHasRangeType>::range_compatible(ty)
     }
 }
 
-impl Type<Postgres> for PgRange<i64> {
-    fn type_info() -> PgTypeInfo {
-        PgTypeInfo::INT8_RANGE
-    }
-
-    fn compatible(ty: &PgTypeInfo) -> bool {
-        range_compatible::<i64>(ty)
-    }
-}
-
-#[cfg(feature = "bigdecimal")]
-impl Type<Postgres> for PgRange<bigdecimal::BigDecimal> {
-    fn type_info() -> PgTypeInfo {
-        PgTypeInfo::NUM_RANGE
-    }
-
-    fn compatible(ty: &PgTypeInfo) -> bool {
-        range_compatible::<bigdecimal::BigDecimal>(ty)
-    }
-}
-
-#[cfg(feature = "rust_decimal")]
-impl Type<Postgres> for PgRange<rust_decimal::Decimal> {
-    fn type_info() -> PgTypeInfo {
-        PgTypeInfo::NUM_RANGE
-    }
-
-    fn compatible(ty: &PgTypeInfo) -> bool {
-        range_compatible::<rust_decimal::Decimal>(ty)
-    }
-}
-
-#[cfg(feature = "chrono")]
-impl Type<Postgres> for PgRange<chrono::NaiveDate> {
-    fn type_info() -> PgTypeInfo {
-        PgTypeInfo::DATE_RANGE
-    }
-
-    fn compatible(ty: &PgTypeInfo) -> bool {
-        range_compatible::<chrono::NaiveDate>(ty)
-    }
-}
-
-#[cfg(feature = "chrono")]
-impl Type<Postgres> for PgRange<chrono::NaiveDateTime> {
-    fn type_info() -> PgTypeInfo {
-        PgTypeInfo::TS_RANGE
-    }
-
-    fn compatible(ty: &PgTypeInfo) -> bool {
-        range_compatible::<chrono::NaiveDateTime>(ty)
-    }
-}
-
-#[cfg(feature = "chrono")]
-impl<Tz: chrono::TimeZone> Type<Postgres> for PgRange<chrono::DateTime<Tz>> {
-    fn type_info() -> PgTypeInfo {
-        PgTypeInfo::TSTZ_RANGE
-    }
-
-    fn compatible(ty: &PgTypeInfo) -> bool {
-        range_compatible::<chrono::DateTime<Tz>>(ty)
-    }
-}
-
-#[cfg(feature = "time")]
-impl Type<Postgres> for PgRange<time::Date> {
-    fn type_info() -> PgTypeInfo {
-        PgTypeInfo::DATE_RANGE
-    }
-
-    fn compatible(ty: &PgTypeInfo) -> bool {
-        range_compatible::<time::Date>(ty)
-    }
-}
-
-#[cfg(feature = "time")]
-impl Type<Postgres> for PgRange<time::PrimitiveDateTime> {
-    fn type_info() -> PgTypeInfo {
-        PgTypeInfo::TS_RANGE
-    }
-
-    fn compatible(ty: &PgTypeInfo) -> bool {
-        range_compatible::<time::PrimitiveDateTime>(ty)
-    }
-}
-
-#[cfg(feature = "time")]
-impl Type<Postgres> for PgRange<time::OffsetDateTime> {
-    fn type_info() -> PgTypeInfo {
-        PgTypeInfo::TSTZ_RANGE
-    }
-
-    fn compatible(ty: &PgTypeInfo) -> bool {
-        range_compatible::<time::OffsetDateTime>(ty)
-    }
-}
-
-impl PgHasArrayType for PgRange<i32> {
+impl<T> PgHasArrayType for PgRange<T>
+where
+    T: PgHasRangeType,
+{
     fn array_type_info() -> PgTypeInfo {
-        PgTypeInfo::INT4_RANGE_ARRAY
-    }
-}
-
-impl PgHasArrayType for PgRange<i64> {
-    fn array_type_info() -> PgTypeInfo {
-        PgTypeInfo::INT8_RANGE_ARRAY
-    }
-}
-
-#[cfg(feature = "bigdecimal")]
-impl PgHasArrayType for PgRange<bigdecimal::BigDecimal> {
-    fn array_type_info() -> PgTypeInfo {
-        PgTypeInfo::NUM_RANGE_ARRAY
-    }
-}
-
-#[cfg(feature = "rust_decimal")]
-impl PgHasArrayType for PgRange<rust_decimal::Decimal> {
-    fn array_type_info() -> PgTypeInfo {
-        PgTypeInfo::NUM_RANGE_ARRAY
-    }
-}
-
-#[cfg(feature = "chrono")]
-impl PgHasArrayType for PgRange<chrono::NaiveDate> {
-    fn array_type_info() -> PgTypeInfo {
-        PgTypeInfo::DATE_RANGE_ARRAY
-    }
-}
-
-#[cfg(feature = "chrono")]
-impl PgHasArrayType for PgRange<chrono::NaiveDateTime> {
-    fn array_type_info() -> PgTypeInfo {
-        PgTypeInfo::TS_RANGE_ARRAY
-    }
-}
-
-#[cfg(feature = "chrono")]
-impl<Tz: chrono::TimeZone> PgHasArrayType for PgRange<chrono::DateTime<Tz>> {
-    fn array_type_info() -> PgTypeInfo {
-        PgTypeInfo::TSTZ_RANGE_ARRAY
-    }
-}
-
-#[cfg(feature = "time")]
-impl PgHasArrayType for PgRange<time::Date> {
-    fn array_type_info() -> PgTypeInfo {
-        PgTypeInfo::DATE_RANGE_ARRAY
-    }
-}
-
-#[cfg(feature = "time")]
-impl PgHasArrayType for PgRange<time::PrimitiveDateTime> {
-    fn array_type_info() -> PgTypeInfo {
-        PgTypeInfo::TS_RANGE_ARRAY
-    }
-}
-
-#[cfg(feature = "time")]
-impl PgHasArrayType for PgRange<time::OffsetDateTime> {
-    fn array_type_info() -> PgTypeInfo {
-        PgTypeInfo::TSTZ_RANGE_ARRAY
+        <T as PgHasRangeType>::range_array_type_info()
     }
 }
 
@@ -331,10 +239,21 @@ where
     fn decode(value: PgValueRef<'r>) -> Result<Self, BoxDynError> {
         match value.format {
             PgValueFormat::Binary => {
-                let element_ty = if let PgTypeKind::Range(element) = &value.type_info.0.kind() {
-                    element
+                // If the range type is a custom type that has not been resolved yet
+                // (e.g. in the simple query protocol) the kind will panic, so fall back
+                // to the element type of `T` instead.
+                let element_info;
+                let element_ty = if matches!(value.type_info.0, PgType::Custom(_)) {
+                    element_info = <T as Type<Postgres>>::type_info();
+                    &element_info
                 } else {
-                    return Err(format!("unexpected non-range type {}", value.type_info).into());
+                    match value.type_info.0.kind() {
+                        PgTypeKind::Range(element) => element,
+                        _ => {
+                            return Err(format!("unexpected non-range type {}", value.type_info)
+                                .into());
+                        }
+                    }
                 };
 
                 let mut buf = value.as_bytes()?;
@@ -511,12 +430,111 @@ where
     }
 }
 
-fn range_compatible<E: Type<Postgres>>(ty: &PgTypeInfo) -> bool {
-    // we require the declared type to be a _range_ with an
-    // element type that is acceptable
-    if let PgTypeKind::Range(element) = &ty.kind() {
-        return E::compatible(element);
+
+impl PgHasRangeType for i32 {
+    fn range_type_info() -> PgTypeInfo {
+        PgTypeInfo::INT4_RANGE
     }
 
-    false
+    fn range_array_type_info() -> PgTypeInfo {
+        PgTypeInfo::INT4_RANGE_ARRAY
+    }
+}
+
+impl PgHasRangeType for i64 {
+    fn range_type_info() -> PgTypeInfo {
+        PgTypeInfo::INT8_RANGE
+    }
+
+    fn range_array_type_info() -> PgTypeInfo {
+        PgTypeInfo::INT8_RANGE_ARRAY
+    }
+}
+
+#[cfg(feature = "bigdecimal")]
+impl PgHasRangeType for bigdecimal::BigDecimal {
+    fn range_type_info() -> PgTypeInfo {
+        PgTypeInfo::NUM_RANGE
+    }
+
+    fn range_array_type_info() -> PgTypeInfo {
+        PgTypeInfo::NUM_RANGE_ARRAY
+    }
+}
+
+#[cfg(feature = "rust_decimal")]
+impl PgHasRangeType for rust_decimal::Decimal {
+    fn range_type_info() -> PgTypeInfo {
+        PgTypeInfo::NUM_RANGE
+    }
+
+    fn range_array_type_info() -> PgTypeInfo {
+        PgTypeInfo::NUM_RANGE_ARRAY
+    }
+}
+
+#[cfg(feature = "chrono")]
+impl PgHasRangeType for chrono::NaiveDate {
+    fn range_type_info() -> PgTypeInfo {
+        PgTypeInfo::DATE_RANGE
+    }
+
+    fn range_array_type_info() -> PgTypeInfo {
+        PgTypeInfo::DATE_RANGE_ARRAY
+    }
+}
+
+#[cfg(feature = "chrono")]
+impl PgHasRangeType for chrono::NaiveDateTime {
+    fn range_type_info() -> PgTypeInfo {
+        PgTypeInfo::TS_RANGE
+    }
+
+    fn range_array_type_info() -> PgTypeInfo {
+        PgTypeInfo::TS_RANGE_ARRAY
+    }
+}
+
+#[cfg(feature = "chrono")]
+impl<Tz: chrono::TimeZone> PgHasRangeType for chrono::DateTime<Tz> {
+    fn range_type_info() -> PgTypeInfo {
+        PgTypeInfo::TSTZ_RANGE
+    }
+
+    fn range_array_type_info() -> PgTypeInfo {
+        PgTypeInfo::TSTZ_RANGE_ARRAY
+    }
+}
+
+#[cfg(feature = "time")]
+impl PgHasRangeType for time::Date {
+    fn range_type_info() -> PgTypeInfo {
+        PgTypeInfo::DATE_RANGE
+    }
+
+    fn range_array_type_info() -> PgTypeInfo {
+        PgTypeInfo::DATE_RANGE_ARRAY
+    }
+}
+
+#[cfg(feature = "time")]
+impl PgHasRangeType for time::PrimitiveDateTime {
+    fn range_type_info() -> PgTypeInfo {
+        PgTypeInfo::TS_RANGE
+    }
+
+    fn range_array_type_info() -> PgTypeInfo {
+        PgTypeInfo::TS_RANGE_ARRAY
+    }
+}
+
+#[cfg(feature = "time")]
+impl PgHasRangeType for time::OffsetDateTime {
+    fn range_type_info() -> PgTypeInfo {
+        PgTypeInfo::TSTZ_RANGE
+    }
+
+    fn range_array_type_info() -> PgTypeInfo {
+        PgTypeInfo::TSTZ_RANGE_ARRAY
+    }
 }

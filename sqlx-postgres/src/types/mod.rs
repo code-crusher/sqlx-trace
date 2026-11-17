@@ -294,7 +294,7 @@ pub use ltree::PgLTreeLabel;
 pub use ltree::PgLTreeParseError;
 pub use money::PgMoney;
 pub use oid::Oid;
-pub use range::PgRange;
+pub use range::{PgHasRangeType, PgRange};
 
 #[cfg(any(feature = "chrono", feature = "time"))]
 pub use time_tz::PgTimeTz;

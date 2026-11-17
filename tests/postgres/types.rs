@@ -647,6 +647,22 @@ test_type!(int4range<PgRange<i32>>(Postgres,
     "'[1,2]'::int4range" == PgRange::from((INC1, EXC3)),
 ));
 
+test_type!(int4range_array<Vec<PgRange<i32>>>(Postgres,
+    "'{}'::int4range[]" == Vec::<PgRange<i32>>::new(),
+    "ARRAY['[1,10)'::int4range, '(20,30]'::int4range]" == vec![
+        PgRange::from((Bound::Included(1), Bound::Excluded(10))),
+        PgRange::from((Bound::Excluded(20), Bound::Included(30))),
+    ],
+));
+
+test_type!(int8range_array<Vec<PgRange<i64>>>(Postgres,
+    "'{}'::int8range[]" == Vec::<PgRange<i64>>::new(),
+    "ARRAY['[1,10)'::int8range, '(20,30]'::int8range]" == vec![
+        PgRange::from((Bound::Included(1_i64), Bound::Excluded(10_i64))),
+        PgRange::from((Bound::Excluded(20_i64), Bound::Included(30_i64))),
+    ],
+));
+
 test_prepared_type!(interval<PgInterval>(
     Postgres,
     "INTERVAL '1h'"

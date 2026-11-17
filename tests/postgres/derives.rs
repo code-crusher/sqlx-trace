@@ -2,7 +2,7 @@ use futures_util::TryStreamExt;
 use sqlx::postgres::types::PgRange;
 use sqlx::{Connection, Executor, FromRow, Postgres};
 use sqlx_core::sql_str::AssertSqlSafe;
-use sqlx_postgres::PgHasArrayType;
+use sqlx_postgres::{PgHasArrayType, PgHasRangeType, PgTypeInfo};
 use sqlx_test::{new, test_type};
 use std::fmt::Debug;
 use std::ops::Bound;
@@ -145,6 +145,38 @@ struct InventoryItem {
 #[sqlx(type_name = "float_range")]
 struct FloatRange(PgRange<f64>);
 
+// Element type of the `float_range` custom range type, as a transparent newtype.
+// This is used to test `PgHasRangeType` impls for user-defined types.
+#[derive(sqlx::Type, Debug, PartialEq, Clone, Copy)]
+#[sqlx(transparent, no_pg_array)]
+struct FloatElem(f64);
+
+impl PgHasRangeType for FloatElem {
+    fn range_type_info() -> PgTypeInfo {
+        PgTypeInfo::with_name("float_range")
+    }
+
+    fn range_array_type_info() -> PgTypeInfo {
+        PgTypeInfo::array_of("float_range")
+    }
+}
+
+// Newtype around i64 to test `PgRange<NewType>` against built-in range types
+// via a manual `PgHasRangeType` impl.
+#[derive(sqlx::Type, Debug, PartialEq, Clone, Copy)]
+#[sqlx(transparent, no_pg_array)]
+struct Int8Elem(i64);
+
+impl PgHasRangeType for Int8Elem {
+    fn range_type_info() -> PgTypeInfo {
+        PgTypeInfo::with_name("int8range")
+    }
+
+    fn range_array_type_info() -> PgTypeInfo {
+        PgTypeInfo::array_of("int8range")
+    }
+}
+
 // Manual `PgHasArrayType` impl
 #[derive(sqlx::Type)]
 #[sqlx(no_pg_array)]
@@ -196,6 +228,36 @@ test_type!(strong_enum_array<Vec<Strong>>(Postgres,
 
 test_type!(floatrange<FloatRange>(Postgres,
     "'[1.234, 5.678]'::float_range" == FloatRange(PgRange::from((Bound::Included(1.234), Bound::Included(5.678)))),
+));
+
+test_type!(float_elem_range<PgRange<FloatElem>>(Postgres,
+    "'(,)'::float_range" == PgRange::<FloatElem>::from((Bound::<FloatElem>::Unbounded, Bound::Unbounded)),
+    "'[1.5, 3.25]'::float_range"
+        == PgRange::from((Bound::Included(FloatElem(1.5)), Bound::Included(FloatElem(3.25)))),
+    "'(1.5,]'::float_range"
+        == PgRange::from((Bound::Excluded(FloatElem(1.5)), Bound::Unbounded)),
+));
+
+test_type!(float_elem_range_array<Vec<PgRange<FloatElem>>>(Postgres,
+    "'{}'::float_range[]" == Vec::<PgRange<FloatElem>>::new(),
+    "ARRAY['[1.5, 3.25]'::float_range, '[4, 5]'::float_range]" == vec![
+        PgRange::from((Bound::Included(FloatElem(1.5)), Bound::Included(FloatElem(3.25)))),
+        PgRange::from((Bound::Included(FloatElem(4.0)), Bound::Included(FloatElem(5.0)))),
+    ],
+));
+
+test_type!(int8_elem_range<PgRange<Int8Elem>>(Postgres,
+    "'(,)'::int8range" == PgRange::<Int8Elem>::from((Bound::<Int8Elem>::Unbounded, Bound::Unbounded)),
+    "'[1, 10)'::int8range"
+        == PgRange::from((Bound::Included(Int8Elem(1)), Bound::Excluded(Int8Elem(10)))),
+));
+
+test_type!(int8_elem_range_array<Vec<PgRange<Int8Elem>>>(Postgres,
+    "'{}'::int8range[]" == Vec::<PgRange<Int8Elem>>::new(),
+    "ARRAY['[1, 10)'::int8range, '[21, 30)'::int8range]" == vec![
+        PgRange::from((Bound::Included(Int8Elem(1)), Bound::Excluded(Int8Elem(10)))),
+        PgRange::from((Bound::Included(Int8Elem(21)), Bound::Excluded(Int8Elem(30)))),
+    ],
 ));
 
 #[sqlx_macros::test]
