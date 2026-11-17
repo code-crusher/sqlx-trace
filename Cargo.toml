@@ -226,7 +226,7 @@ features = ["time", "net", "sync", "fs", "io-util", "rt"]
 default-features = false
 
 [dependencies]
-sqlx-core = { workspace = true, features = ["migrate"] }
+sqlx-core = { workspace = true }
 sqlx-macros = { workspace = true, optional = true }
 
 sqlx-mysql = { workspace = true, optional = true, default-features = false }
@@ -301,6 +301,13 @@ required-features = ["any"]
 name = "migrate-macro"
 path = "tests/migrate/macro.rs"
 required-features = ["macros", "migrate"]
+
+# Regression tests for migration support being fully opt-in (issue #4418).
+# The tests are hermetic: they spawn `cargo tree` against synthetic downstream
+# crates, selecting the features to test in those crates' manifests.
+[[test]]
+name = "migrate-opt-in"
+path = "tests/migrate-opt-in.rs"
 
 #
 # SQLite
