@@ -51,6 +51,7 @@ pub use query::Query;
 pub use ready_for_query::{ReadyForQuery, TransactionStatus};
 pub use response::{Notice, PgSeverity};
 pub use row_description::RowDescription;
+pub(crate) use sasl::oauth_bearer_initial_response;
 pub use sasl::{SaslInitialResponse, SaslResponse};
 use sqlx_core::io::ProtocolEncode;
 pub use ssl_request::SslRequest;

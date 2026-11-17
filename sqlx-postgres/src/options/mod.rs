@@ -1,10 +1,11 @@
 use std::borrow::Cow;
 use std::env::var;
-use std::fmt::{self, Display, Write};
+use std::fmt::{self, Display, Formatter, Write};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
+use futures_core::future::BoxFuture;
 use sqlx_core::net::tls::TlsConnector;
 pub use ssl_mode::PgSslMode;
 
@@ -16,7 +17,7 @@ mod pgpass;
 mod ssl_mode;
 
 #[doc = include_str!("doc.md")]
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PgConnectOptions {
     pub(crate) host: String,
     pub(crate) port: u16,
@@ -31,6 +32,7 @@ pub struct PgConnectOptions {
     pub(crate) log_settings: LogSettings,
     pub(crate) extra_float_digits: Option<Cow<'static, str>>,
     pub(crate) options: Option<String>,
+    pub(crate) oauth_token_provider: Option<OAuthTokenProvider>,
 }
 
 impl Default for PgConnectOptions {
@@ -38,6 +40,45 @@ impl Default for PgConnectOptions {
         Self::new_without_pgpass().apply_pgpass()
     }
 }
+
+impl fmt::Debug for PgConnectOptions {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PgConnectOptions")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("hostaddr", &self.hostaddr)
+            .field("socket", &self.socket)
+            .field("username", &self.username)
+            .field("password", &self.password.as_ref().map(|_| "<REDACTED>"))
+            .field("database", &self.database)
+            .field("ssl_options", &self.ssl_options)
+            .field("statement_cache_capacity", &self.statement_cache_capacity)
+            .field("application_name", &self.application_name)
+            .field("log_settings", &self.log_settings)
+            .field("extra_float_digits", &self.extra_float_digits)
+            .field("options", &self.options)
+            .field(
+                "oauth_token_provider",
+                &self.oauth_token_provider.as_ref().map(|_| "<set>"),
+            )
+            .finish()
+    }
+}
+
+/// A function that returns a fresh OAuth 2.0 bearer token.
+///
+/// Used by [`PgConnectOptions::oauth_token_provider`] and
+/// [`PgConnectOptions::oauth_token`]. The returned future is driven to completion
+/// during the connection handshake, so it may perform network I/O (for example,
+/// refreshing an access token from an identity provider).
+///
+/// `Fn()` (not `FnMut`/`FnOnce`) is required so that the same connection
+/// options can be used to open multiple connections, e.g. by a connection pool.
+pub type OAuthTokenProvider = Arc<
+    dyn Fn() -> BoxFuture<'static, Result<String, Box<dyn std::error::Error + Send + Sync>>>
+        + Send
+        + Sync,
+>;
 
 #[derive(Debug, Clone)]
 pub(crate) struct SslOptions {
@@ -110,6 +151,7 @@ impl PgConnectOptions {
             extra_float_digits: Some("2".into()),
             log_settings: Default::default(),
             options: var("PGOPTIONS").ok(),
+            oauth_token_provider: None,
         }
     }
 
@@ -219,6 +261,75 @@ impl PgConnectOptions {
     pub fn password(mut self, password: &str) -> Self {
         self.password = Some(password.to_owned());
         self
+    }
+
+    /// Sets a function that returns an OAuth 2.0 bearer token to present to the server.
+    ///
+    /// PostgreSQL 18 and later support authenticating with an OAuth access token
+    /// via the SASL `OAUTHBEARER` mechanism (RFC 7628); the server side is configured with
+    /// the `oauth` authentication method. This is the only authentication method available
+    /// on some managed Postgres offerings.
+    ///
+    /// The given function is called while establishing each connection, so it should return
+    /// a token that is valid at the time of the call. Because tokens expire, this is the
+    /// preferred way to supply a token: each connection opened (for example, by a connection
+    /// pool) will fetch a fresh token.
+    ///
+    /// The function may perform asynchronous work (e.g. calling an identity provider)
+    /// and must return the token as a string without the `Bearer ` prefix.
+    ///
+    /// If the server offers both `OAUTHBEARER` and `SCRAM-SHA-256`, the token is used
+    /// and the SCRAM exchange is skipped. Calling this method (or `oauth_token`)
+    /// again replaces the previously configured provider.
+    ///
+    /// Tokens are not written to the `Debug` representation of these options.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use sqlx_postgres::PgConnectOptions;
+    /// # async fn get_token() -> Result<String, std::io::Error> { unimplemented!() }
+    /// //
+    /// let options = PgConnectOptions::new()
+    ///     .username("root")
+    ///     .oauth_token_provider(|| async move {
+    ///         Ok(get_token().await?)
+    ///     });
+    /// ```
+    pub fn oauth_token_provider<F, Fut>(mut self, provider: F) -> Self
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<String, Box<dyn std::error::Error + Send + Sync>>>
+            + Send
+            + 'static,
+    {
+        self.oauth_token_provider = Some(Arc::new(move || Box::pin(provider())));
+        self
+    }
+
+    /// Sets a fixed OAuth 2.0 bearer token to present to the server.
+    ///
+    /// This is a convenience wrapper around [`PgConnectOptions::oauth_token_provider`]
+    /// for tokens that outlive the connections made with them. Note that the token is
+    /// evaluated when the connection is opened, so a stale token will fail authentication;
+    /// consider `oauth_token_provider` for long-lived applications.
+    ///
+    /// The token must not include the `Bearer ` prefix.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # use sqlx_postgres::PgConnectOptions;
+    /// let options = PgConnectOptions::new()
+    ///     .username("root")
+    ///     .oauth_token("my-token");
+    /// ```
+    pub fn oauth_token(self, token: impl Into<String>) -> Self {
+        let token = token.into();
+        self.oauth_token_provider(move || {
+            let token = token.clone();
+            async move { Ok(token) }
+        })
     }
 
     /// Sets the database name. Defaults to be the same as the user name.

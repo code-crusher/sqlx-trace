@@ -141,8 +141,10 @@ impl ProtocolDecode<'_> for AuthenticationSaslContinue {
         // r=/z+giZiTxAH7r8sNAeHr7cvpqV3uo7G/bJBIJO3pjVM7t3ng,s=4UV68bIkC8f9/X8xH7aPhg==,i=4096
 
         for item in buf.split(|b| *b == b',') {
-            let key = item[0];
-            let value = &item[2..];
+            // Items may be shorter than "k=v"; the OAuth error document is
+            // arbitrary JSON, so parse defensively instead of panicking.
+            let Some(&key) = item.first() else { continue };
+            let Some(value) = item.get(2..) else { continue };
 
             match key {
                 b'r' => {
@@ -180,8 +182,8 @@ impl ProtocolDecode<'_> for AuthenticationSaslFinal {
         let mut verifier = Vec::new();
 
         for item in buf.split(|b| *b == b',') {
-            let key = item[0];
-            let value = &item[2..];
+            let Some(&key) = item.first() else { continue };
+            let Some(value) = item.get(2..) else { continue };
 
             if let b'v' = key {
                 verifier = BASE64_STANDARD.decode(value).map_err(Error::protocol)?;
