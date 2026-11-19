@@ -301,6 +301,39 @@ async fn test_derive_weak_enum() -> anyhow::Result<()> {
     Ok(())
 }
 
+// A value may be added to a MySQL `ENUM` column before every client knows about it, e.g. during a
+// rolling deployment. The `#[sqlx(other)]` variant captures it instead of failing to decode.
+#[derive(sqlx::Type, PartialEq, Eq, Debug)]
+#[sqlx(rename_all = "lowercase")]
+enum Operation {
+    Add,
+    Subtract,
+    #[sqlx(other)]
+    Unknown(String),
+}
+
+test_type!(other_enum<Operation>(MySql,
+    "'add'" == Operation::Add,
+    "'subtract'" == Operation::Subtract,
+    "'multiply'" == Operation::Unknown("multiply".to_owned()),
+));
+
+// Same as above, but for a "weak" enum which encodes to an integer.
+#[derive(sqlx::Type, PartialEq, Eq, Debug)]
+#[repr(i32)]
+enum WeakOperation {
+    Add = 1,
+    Subtract = 2,
+    #[sqlx(other)]
+    Unknown(i32),
+}
+
+test_type!(other_weak_enum<WeakOperation>(MySql,
+    "1" == WeakOperation::Add,
+    "2" == WeakOperation::Subtract,
+    "3" == WeakOperation::Unknown(3),
+));
+
 #[derive(PartialEq, Eq, Debug, sqlx::Type)]
 #[sqlx(transparent)]
 struct TransparentTuple(i64);

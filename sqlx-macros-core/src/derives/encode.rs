@@ -2,7 +2,7 @@ use super::attributes::{
     check_strong_enum_attributes, check_struct_attributes, check_transparent_attributes,
     check_weak_enum_attributes, parse_child_attributes, parse_container_attributes,
 };
-use super::rename_all;
+use super::{enum_discriminants, rename_all};
 use proc_macro2::{Span, TokenStream};
 use quote::quote;
 use syn::punctuated::Punctuated;
@@ -113,11 +113,33 @@ fn expand_derive_encode_weak_enum(
     let repr = attr.repr.unwrap();
     let ident = &input.ident;
 
+    let other_variant = variants
+        .iter()
+        .find(|variant| parse_child_attributes(&variant.attrs).is_ok_and(|a| a.other));
+
+    // A variant marked `#[sqlx(other)]` carries a payload, which makes the enum ineligible for
+    // `as` casts (`Self::Variant as #repr`), so the discriminants are read from a field-less
+    // shadow enum mirroring the original's.
+    let (discriminants, cast_target) = match other_variant {
+        Some(_) => {
+            let (shadow, definition) = enum_discriminants(ident, &repr, variants);
+
+            (definition, shadow)
+        }
+        None => (TokenStream::new(), ident.clone()),
+    };
+
     let mut values = Vec::new();
 
     for v in variants {
         let id = &v.ident;
-        values.push(quote!(#ident :: #id => (#ident :: #id as #repr),));
+
+        if parse_child_attributes(&v.attrs)?.other {
+            // The variant captures an unrecognized value, so it is encoded back verbatim.
+            values.push(quote!(#ident :: #id (value) => *value,));
+        } else {
+            values.push(quote!(#ident :: #id => (#cast_target::#id as #repr),));
+        }
     }
 
     Ok(quote!(
@@ -130,6 +152,8 @@ fn expand_derive_encode_weak_enum(
                 &self,
                 buf: &mut <DB as ::sqlx::database::Database>::ArgumentBuffer,
             ) -> ::std::result::Result<::sqlx::encode::IsNull, ::sqlx::error::BoxDynError> {
+                #discriminants
+
                 let value = match self {
                     #(#values)*
                 };
@@ -153,12 +177,19 @@ fn expand_derive_encode_strong_enum(
     let ident = &input.ident;
 
     let mut value_arms = Vec::new();
+    let mut has_other = false;
 
     for v in variants {
         let id = &v.ident;
         let attributes = parse_child_attributes(&v.attrs)?;
 
-        if let Some(rename) = attributes.rename {
+        if attributes.other {
+            // The variant captures an unrecognized value, so it is encoded back verbatim.
+            has_other = true;
+            value_arms.push(quote!(
+                #ident :: #id (value) => ::std::convert::AsRef::<::std::primitive::str>::as_ref(value),
+            ));
+        } else if let Some(rename) = attributes.rename {
             value_arms.push(quote!(#ident :: #id => #rename,));
         } else if let Some(pattern) = cattr.rename_all {
             let name = rename_all(&id.to_string(), pattern);
@@ -170,29 +201,54 @@ fn expand_derive_encode_strong_enum(
         }
     }
 
+    // Without `#[sqlx(other)]` the payload of every arm is a `&'static str`, so the bound and the
+    // call can name `'q` directly, exactly as before. With it, the payload is borrowed from the
+    // `self` reference, which doesn't live for `'q`, so both are relaxed to an inference-friendly
+    // form.
+    let (bound, encode, size_hint) = if has_other {
+        (
+            quote!(for<'a> &'a ::std::primitive::str: ::sqlx::encode::Encode<'a, DB>,),
+            quote!(<&::std::primitive::str as ::sqlx::encode::Encode<'_, DB>>::encode(val, buf)),
+            quote!(<&::std::primitive::str as ::sqlx::encode::Encode<'_, DB>>::size_hint(&val)),
+        )
+    } else {
+        (
+            quote!(&'q ::std::primitive::str: ::sqlx::encode::Encode<'q, DB>,),
+            quote!(<&::std::primitive::str as ::sqlx::encode::Encode<'q, DB>>::encode(val, buf)),
+            quote!(<&::std::primitive::str as ::sqlx::encode::Encode<'q, DB>>::size_hint(&val)),
+        )
+    };
+
+    // Only the `other` arms borrow from `self`, so the annotation is likewise only needed then.
+    let val_type = if has_other {
+        quote!(: &::std::primitive::str)
+    } else {
+        TokenStream::new()
+    };
+
     Ok(quote!(
         #[automatically_derived]
         impl<'q, DB: ::sqlx::Database> ::sqlx::encode::Encode<'q, DB> for #ident
         where
-            &'q ::std::primitive::str: ::sqlx::encode::Encode<'q, DB>,
+            #bound
         {
             fn encode_by_ref(
                 &self,
                 buf: &mut <DB as ::sqlx::database::Database>::ArgumentBuffer,
             ) -> ::std::result::Result<::sqlx::encode::IsNull, ::sqlx::error::BoxDynError> {
-                let val = match self {
+                let val #val_type = match self {
                     #(#value_arms)*
                 };
 
-                <&::std::primitive::str as ::sqlx::encode::Encode<'q, DB>>::encode(val, buf)
+                #encode
             }
 
             fn size_hint(&self) -> ::std::primitive::usize {
-                let val = match self {
+                let val #val_type = match self {
                     #(#value_arms)*
                 };
 
-                <&::std::primitive::str as ::sqlx::encode::Encode<'q, DB>>::size_hint(&val)
+                #size_hint
             }
         }
     ))

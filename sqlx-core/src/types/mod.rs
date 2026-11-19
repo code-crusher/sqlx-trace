@@ -193,6 +193,43 @@ pub use bstr::{BStr, BString};
 /// enum Color { Red, Green, Blue }
 /// ```
 ///
+/// A variant may be marked `#[sqlx(other)]` to capture any value that doesn't match another
+/// variant, instead of failing to decode it. This makes it possible to add values to a SQL enum
+/// type without breaking binaries built before the change, e.g. during a rolling deployment.
+///
+/// The variant must have exactly one unnamed field, which receives the unrecognized value. For
+/// enums without `#[repr(_)]` it is a string type, and for `#[repr(_)]` enums it must be the
+/// representation type:
+///
+/// ```rust,ignore
+/// #[derive(sqlx::Type)]
+/// #[sqlx(type_name = "color")]
+/// #[sqlx(rename_all = "lowercase")]
+/// enum Color {
+///     Red,
+///     Green,
+///     Blue,
+///     #[sqlx(other)]
+///     Unknown(String),
+/// }
+///
+/// #[derive(sqlx::Type)]
+/// #[repr(i32)]
+/// enum Status {
+///     Active = 1,
+///     Inactive = 2,
+///     #[sqlx(other)]
+///     Unknown(i32),
+/// }
+/// ```
+///
+/// The captured value is encoded back as-is when the variant is bound as a query argument.
+///
+/// Note that for enums without `#[repr(_)]` this adds a `for<'a> &'a str: Encode<'a, DB>` bound
+/// to the generated `Encode` impl, which most databases already satisfy. Use `String` or
+/// `Box<str>` as the field type; `&str` and `Cow<'static, str>` cannot be constructed from a
+/// decoded value.
+///
 /// ### Records
 ///
 /// User-defined composite types are supported through deriving a `struct`.

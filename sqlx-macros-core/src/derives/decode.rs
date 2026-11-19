@@ -2,7 +2,7 @@ use super::attributes::{
     check_strong_enum_attributes, check_struct_attributes, check_transparent_attributes,
     check_weak_enum_attributes, parse_child_attributes, parse_container_attributes,
 };
-use super::rename_all;
+use super::{enum_discriminants, rename_all};
 use proc_macro2::TokenStream;
 use quote::quote;
 use syn::punctuated::Punctuated;
@@ -107,15 +107,52 @@ fn expand_derive_decode_weak_enum(
     let ident = &input.ident;
     let ident_s = ident.to_string();
 
+    let mut other_variant = None;
+
+    for variant in variants {
+        if parse_child_attributes(&variant.attrs)?.other {
+            other_variant = Some(variant);
+        }
+    }
+
+    // A variant marked `#[sqlx(other)]` carries a payload, which makes the enum ineligible for
+    // `as` casts (`Self::Variant as #repr`), so the discriminants of the other variants are read
+    // from a field-less shadow enum mirroring the original's discriminants.
+    let (discriminants, cast_target) = match other_variant {
+        Some(_) => {
+            let (shadow, definition) = enum_discriminants(ident, &repr, variants);
+
+            (definition, shadow)
+        }
+        None => (TokenStream::new(), ident.clone()),
+    };
+
     let arms = variants
         .iter()
-        .map(|v| {
-            let id = &v.ident;
+        .filter(|variant| other_variant.is_none_or(|other| other.ident != variant.ident))
+        .map(|variant| {
+            let id = &variant.ident;
+
             parse_quote! {
-                _ if (#ident::#id as #repr) == value => ::std::result::Result::Ok(#ident::#id),
+                _ if (#cast_target::#id as #repr) == value => ::std::result::Result::Ok(#ident::#id),
             }
         })
         .collect::<Vec<Arm>>();
+
+    let other_arm = match other_variant {
+        Some(variant) => {
+            let id = &variant.ident;
+
+            quote! {
+                _ => ::std::result::Result::Ok(#ident::#id(value)),
+            }
+        }
+        None => quote! {
+            _ => ::std::result::Result::Err(::std::boxed::Box::new(::sqlx::Error::Decode(
+                ::std::format!("invalid value {:?} for enum {}", value, #ident_s).into(),
+            ))),
+        },
+    };
 
     Ok(quote!(
         #[automatically_derived]
@@ -133,11 +170,11 @@ fn expand_derive_decode_weak_enum(
             > {
                 let value = <#repr as ::sqlx::decode::Decode<'r, DB>>::decode(value)?;
 
+                #discriminants
+
                 match value {
                     #(#arms)*
-                    _ => ::std::result::Result::Err(::std::boxed::Box::new(::sqlx::Error::Decode(
-                        ::std::format!("invalid value {:?} for enum {}", value, #ident_s).into(),
-                    )))
+                    #other_arm
                 }
             }
         }
@@ -153,27 +190,51 @@ fn expand_derive_decode_strong_enum(
     let ident = &input.ident;
     let ident_s = ident.to_string();
 
-    let value_arms = variants.iter().map(|v| -> Arm {
-        let id = &v.ident;
-        let attributes = parse_child_attributes(&v.attrs).unwrap();
+    let other_variant = variants
+        .iter()
+        .find(|variant| parse_child_attributes(&variant.attrs).is_ok_and(|a| a.other));
 
-        if let Some(rename) = attributes.rename {
-            parse_quote!(#rename => ::std::result::Result::Ok(#ident :: #id),)
-        } else if let Some(pattern) = cattr.rename_all {
-            let name = rename_all(&id.to_string(), pattern);
+    let value_arms = variants
+        .iter()
+        .filter(|variant| other_variant.is_none_or(|other| other.ident != variant.ident))
+        .map(|variant| -> Arm {
+            let id = &variant.ident;
+            let attributes = parse_child_attributes(&variant.attrs).unwrap();
 
-            parse_quote!(#name => ::std::result::Result::Ok(#ident :: #id),)
-        } else {
-            let name = id.to_string();
-            parse_quote!(#name => ::std::result::Result::Ok(#ident :: #id),)
+            if let Some(rename) = attributes.rename {
+                parse_quote!(#rename => ::std::result::Result::Ok(#ident :: #id),)
+            } else if let Some(pattern) = cattr.rename_all {
+                let name = rename_all(&id.to_string(), pattern);
+
+                parse_quote!(#name => ::std::result::Result::Ok(#ident :: #id),)
+            } else {
+                let name = id.to_string();
+                parse_quote!(#name => ::std::result::Result::Ok(#ident :: #id),)
+            }
+        });
+
+    let other_arm = match other_variant {
+        Some(variant) => {
+            let id = &variant.ident;
+
+            quote! {
+                other => ::std::result::Result::Ok(
+                    #ident :: #id (::std::convert::Into::into(other)),
+                ),
+            }
         }
-    });
+        None => quote! {
+            _ => ::std::result::Result::Err(
+                ::std::format!("invalid value {:?} for enum {}", value, #ident_s).into(),
+            ),
+        },
+    };
 
     let values = quote! {
         match value {
             #(#value_arms)*
 
-            _ => Err(format!("invalid value {:?} for enum {}", value, #ident_s).into())
+            #other_arm
         }
     };
 

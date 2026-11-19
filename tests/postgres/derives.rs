@@ -130,6 +130,19 @@ enum Mood {
     Sad,
 }
 
+// A "strong" enum whose unknown variants decode into a catch-all instead of failing. This makes
+// it possible to add values to the database type before every client knows about them, e.g.
+// during a rolling deployment (see issue #4391).
+#[derive(PartialEq, Debug, sqlx::Type)]
+#[sqlx(type_name = "permission")]
+#[sqlx(rename_all = "lowercase")]
+enum Permission {
+    Add,
+    Subtract,
+    #[sqlx(other)]
+    Unknown(String),
+}
+
 // Records must map to a custom type
 // Note that all types are types in Postgres
 #[derive(PartialEq, Debug, sqlx::Type)]
@@ -388,6 +401,81 @@ SELECT id, mood FROM people WHERE id = $1
 
     assert!(rec.0);
     assert_eq!(rec.1, ColorPascalCase::RedGreen);
+
+    Ok(())
+}
+
+// A value may be added to a Postgres enum type before every client knows about it, e.g. during a
+// rolling deployment. The `#[sqlx(other)]` variant captures it instead of failing to decode.
+#[sqlx_macros::test]
+async fn test_enum_other_variant() -> anyhow::Result<()> {
+    let mut conn = new::<Postgres>().await?;
+
+    conn.execute(
+        r#"
+DROP TABLE IF EXISTS permissions;
+
+DROP TYPE IF EXISTS permission CASCADE;
+
+CREATE TYPE permission AS ENUM ( 'add', 'subtract', 'multiply' );
+
+CREATE TABLE permissions (
+    id          serial PRIMARY KEY,
+    permission  permission NOT NULL
+);
+        "#,
+    )
+    .await?;
+
+    // Drop and re-acquire the connection so the new type is known to the connection.
+    conn.close().await?;
+    let mut conn = new::<Postgres>().await?;
+
+    // `multiply` has no matching variant, so it decodes into the catch-all.
+    let permission: Permission = sqlx::query_scalar("SELECT 'multiply'::permission")
+        .fetch_one(&mut conn)
+        .await?;
+
+    assert_eq!(permission, Permission::Unknown("multiply".to_owned()));
+
+    // Known values still decode into their variants.
+    let permission: Permission = sqlx::query_scalar("SELECT 'subtract'::permission")
+        .fetch_one(&mut conn)
+        .await?;
+
+    assert_eq!(permission, Permission::Subtract);
+
+    // The captured value round-trips back to the database unchanged.
+    let id: i32 =
+        sqlx::query_scalar("INSERT INTO permissions (permission) VALUES ($1) RETURNING id")
+            .bind(&permission)
+            .fetch_one(&mut conn)
+            .await?;
+
+    let permission: Permission =
+        sqlx::query_scalar("SELECT permission FROM permissions WHERE id = $1")
+            .bind(id)
+            .fetch_one(&mut conn)
+            .await?;
+
+    assert_eq!(permission, Permission::Subtract);
+
+    // Even a value unknown to the client can be written back.
+    let unknown = Permission::Unknown("multiply".to_owned());
+
+    let id: i32 =
+        sqlx::query_scalar("INSERT INTO permissions (permission) VALUES ($1) RETURNING id")
+            .bind(&unknown)
+            .fetch_one(&mut conn)
+            .await?;
+
+    let permission: Permission =
+        sqlx::query_scalar("SELECT permission FROM permissions WHERE id = $1")
+            .bind(id)
+            .fetch_one(&mut conn)
+            .await?;
+
+    assert_eq!(permission, unknown);
 
     Ok(())
 }

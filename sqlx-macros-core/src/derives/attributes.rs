@@ -1,8 +1,8 @@
 use proc_macro2::{Ident, Span, TokenStream};
-use quote::quote_spanned;
+use quote::{quote_spanned, ToTokens};
 use syn::{
-    parenthesized, punctuated::Punctuated, token::Comma, Attribute, DeriveInput, Field, LitStr,
-    Meta, Token, Type, Variant,
+    parenthesized, punctuated::Punctuated, token::Comma, Attribute, DeriveInput, Field, Fields,
+    LitStr, Meta, Token, Type, Variant,
 };
 
 macro_rules! assert_attribute {
@@ -75,6 +75,7 @@ pub struct SqlxChildAttributes {
     pub try_from: Option<Type>,
     pub skip: bool,
     pub json: Option<JsonAttribute>,
+    pub other: bool,
 }
 
 pub fn parse_container_attributes(input: &[Attribute]) -> syn::Result<SqlxContainerAttributes> {
@@ -163,6 +164,7 @@ pub fn parse_child_attributes(input: &[Attribute]) -> syn::Result<SqlxChildAttri
     let mut flatten = false;
     let mut skip: bool = false;
     let mut json = None;
+    let mut other = false;
 
     for attr in input.iter().filter(|a| a.path().is_ident("sqlx")) {
         attr.parse_nested_meta(|meta| {
@@ -190,6 +192,8 @@ pub fn parse_child_attributes(input: &[Attribute]) -> syn::Result<SqlxChildAttri
                 } else {
                     json = Some(JsonAttribute::NonNullable);
                 }
+            } else if meta.path.is_ident("other") {
+                other = true;
             }
 
             Ok(())
@@ -210,6 +214,7 @@ pub fn parse_child_attributes(input: &[Attribute]) -> syn::Result<SqlxChildAttri
         try_from,
         skip,
         json,
+        other,
     })
 }
 
@@ -232,6 +237,8 @@ pub fn check_transparent_attributes(
         "unexpected #[sqlx(rename = ..)]",
         field
     );
+
+    assert_attribute!(!ch_attributes.other, "unexpected #[sqlx(other)]", field);
 
     Ok(attributes)
 }
@@ -289,6 +296,10 @@ pub fn check_weak_enum_attributes(
         input
     );
 
+    let repr = attributes.repr.as_ref().expect("checked above");
+
+    let mut other = None;
+
     for variant in variants {
         let attributes = parse_child_attributes(&variant.attrs)?;
 
@@ -297,6 +308,34 @@ pub fn check_weak_enum_attributes(
             "unexpected #[sqlx(rename = ..)]",
             variant
         );
+
+        if attributes.other {
+            check_other_variant(variant, &attributes, Some(repr))?;
+
+            assert_attribute!(
+                other.is_none(),
+                "only one variant may be marked #[sqlx(other)]",
+                variant
+            );
+
+            other = Some(variant);
+        }
+    }
+
+    // A payload variant makes the enum ineligible for `as` casts, so the discriminant of each
+    // other variant could not be read anymore (see `enum_discriminants()`).
+    if other.is_some() {
+        for variant in variants {
+            if parse_child_attributes(&variant.attrs)?.other {
+                continue;
+            }
+
+            assert_attribute!(
+                matches!(variant.fields, Fields::Unit),
+                "variants of a #[repr(..)] enum may only have fields when marked #[sqlx(other)]",
+                variant
+            );
+        }
     }
 
     Ok(attributes)
@@ -304,13 +343,79 @@ pub fn check_weak_enum_attributes(
 
 pub fn check_strong_enum_attributes(
     input: &DeriveInput,
-    _variants: &Punctuated<Variant, Comma>,
+    variants: &Punctuated<Variant, Comma>,
 ) -> syn::Result<SqlxContainerAttributes> {
     let attributes = check_enum_attributes(input)?;
 
     assert_attribute!(attributes.repr.is_none(), "unexpected #[repr(..)]", input);
 
+    let mut other = None;
+
+    for variant in variants {
+        let attributes = parse_child_attributes(&variant.attrs)?;
+
+        if attributes.other {
+            check_other_variant(variant, &attributes, None)?;
+
+            assert_attribute!(
+                other.is_none(),
+                "only one variant may be marked #[sqlx(other)]",
+                variant
+            );
+
+            other = Some(variant);
+        }
+    }
+
     Ok(attributes)
+}
+
+/// Validates a variant marked with `#[sqlx(other)]`, which receives any value that doesn't match
+/// another variant of the enum.
+///
+/// For `#[repr(..)]` enums the payload has to be the representation type, e.g. `Other(i32)` for
+/// `#[repr(i32)]`.
+fn check_other_variant(
+    variant: &Variant,
+    attributes: &SqlxChildAttributes,
+    repr: Option<&Ident>,
+) -> syn::Result<()> {
+    assert_attribute!(
+        attributes.rename.is_none(),
+        "unexpected #[sqlx(rename = ..)]: the #[sqlx(other)] variant matches any value",
+        variant
+    );
+
+    let Fields::Unnamed(fields) = &variant.fields else {
+        fail!(
+            variant,
+            "#[sqlx(other)] requires exactly one unnamed field to capture the unrecognized value, \
+             e.g. `Other(String)`"
+        );
+    };
+
+    if fields.unnamed.len() != 1 {
+        fail!(
+            variant,
+            "#[sqlx(other)] requires exactly one unnamed field to capture the unrecognized value, \
+             e.g. `Other(String)`"
+        );
+    }
+
+    if let Some(repr) = repr {
+        let field = fields.unnamed.first().expect("just checked");
+
+        assert_attribute!(
+            *repr == field.ty.to_token_stream().to_string(),
+            format!(
+                "#[sqlx(other)] on a #[repr({repr})] enum requires the field to be of type \
+                 `{repr}`"
+            ),
+            field
+        );
+    }
+
+    Ok(())
 }
 
 pub fn check_struct_attributes(
@@ -341,6 +446,8 @@ pub fn check_struct_attributes(
             "unexpected #[sqlx(rename = ..)]",
             field
         );
+
+        assert_attribute!(!attributes.other, "unexpected #[sqlx(other)]", field);
     }
 
     Ok(attributes)
@@ -381,5 +488,149 @@ mod tests {
 
         let input = enum_input(quote::quote!(#[repr(i16, align(8))]));
         assert_eq!(check_enum_attributes(&input).unwrap().repr.unwrap(), "i16");
+    }
+
+    fn variants(input: &DeriveInput) -> &Punctuated<Variant, Comma> {
+        match &input.data {
+            syn::Data::Enum(data) => &data.variants,
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn strong_enum_other_variant_is_accepted() {
+        let input: DeriveInput = syn::parse2(quote::quote! {
+            enum Foo {
+                A,
+                #[sqlx(other)]
+                Other(String),
+            }
+        })
+        .unwrap();
+
+        check_strong_enum_attributes(&input, variants(&input)).unwrap();
+    }
+
+    #[test]
+    fn strong_enum_other_variant_requires_a_payload() {
+        for variant in [
+            quote::quote!(
+                #[sqlx(other)]
+                Other
+            ),
+            quote::quote!(
+                #[sqlx(other)]
+                Other {}
+            ),
+            quote::quote!(
+                #[sqlx(other)]
+                Other(String, String)
+            ),
+        ] {
+            let input: DeriveInput = syn::parse2(quote::quote! {
+                enum Foo {
+                    A,
+                    #variant,
+                }
+            })
+            .unwrap();
+
+            let err = check_strong_enum_attributes(&input, variants(&input))
+                .err()
+                .expect("a payload should be required");
+
+            assert!(
+                err.to_string().contains("exactly one unnamed field"),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn enum_other_variant_may_only_appear_once() {
+        let input: DeriveInput = syn::parse2(quote::quote! {
+            enum Foo {
+                #[sqlx(other)]
+                A(String),
+                #[sqlx(other)]
+                B(String),
+            }
+        })
+        .unwrap();
+
+        let err = check_strong_enum_attributes(&input, variants(&input))
+            .err()
+            .expect("a duplicate should be rejected");
+
+        assert!(err.to_string().contains("only one variant"), "{err}");
+    }
+
+    #[test]
+    fn enum_other_variant_rejects_rename() {
+        let input: DeriveInput = syn::parse2(quote::quote! {
+            enum Foo {
+                A,
+                #[sqlx(other, rename = "x")]
+                Other(String),
+            }
+        })
+        .unwrap();
+
+        let err = check_strong_enum_attributes(&input, variants(&input))
+            .err()
+            .expect("a rename should be rejected");
+
+        assert!(err.to_string().contains("rename"), "{err}");
+    }
+
+    #[test]
+    fn weak_enum_other_variant_requires_the_repr_type() {
+        let input: DeriveInput = syn::parse2(quote::quote! {
+            #[repr(i32)]
+            enum Foo {
+                A = 1,
+                #[sqlx(other)]
+                Other(String),
+            }
+        })
+        .unwrap();
+
+        let err = check_weak_enum_attributes(&input, variants(&input))
+            .err()
+            .expect("a payload of the wrong type should be rejected");
+
+        assert!(err.to_string().contains("i32"), "{err}");
+
+        let input: DeriveInput = syn::parse2(quote::quote! {
+            #[repr(i32)]
+            enum Foo {
+                A = 1,
+                #[sqlx(other)]
+                Other(i32),
+            }
+        })
+        .unwrap();
+
+        check_weak_enum_attributes(&input, variants(&input)).unwrap();
+    }
+
+    #[test]
+    fn weak_enum_other_variant_rejects_other_payloads() {
+        let input: DeriveInput = syn::parse2(quote::quote! {
+            #[repr(i32)]
+            enum Foo {
+                A = 1,
+                B(i32),
+                #[sqlx(other)]
+                Other(i32),
+            }
+        })
+        .unwrap();
+
+        let err = check_weak_enum_attributes(&input, variants(&input))
+            .err()
+            .expect("another payload variant should be rejected");
+
+        assert!(err.to_string().contains("may only have fields"), "{err}");
     }
 }

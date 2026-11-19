@@ -11,8 +11,9 @@ pub use row::expand_derive_from_row;
 
 use self::attributes::RenameAll;
 use heck::{ToKebabCase, ToLowerCamelCase, ToShoutySnakeCase, ToSnakeCase, ToUpperCamelCase};
-use proc_macro2::TokenStream;
-use syn::DeriveInput;
+use proc_macro2::{Group, Ident, TokenStream, TokenTree};
+use quote::{format_ident, quote, ToTokens};
+use syn::{punctuated::Punctuated, token::Comma, DeriveInput, Variant};
 
 pub fn expand_derive_type_encode_decode(input: &DeriveInput) -> syn::Result<TokenStream> {
     let encode_tts = expand_derive_encode(input)?;
@@ -34,4 +35,63 @@ pub(crate) fn rename_all(s: &str, pattern: RenameAll) -> String {
         RenameAll::CamelCase => s.to_lower_camel_case(),
         RenameAll::PascalCase => s.to_upper_camel_case(),
     }
+}
+
+/// Returns an identifier for a field-less enum mirroring the variants of the given
+/// `#[repr(..)]` enum, along with its definition.
+///
+/// This is used when one of the variants carries a payload (as required by `#[sqlx(other)]`):
+/// such an enum can no longer be used in `as` casts (`Foo::Bar as i32`), so the discriminant of
+/// each variant has to be read from a mirror that is always field-less.
+///
+/// The mirror repeats the original discriminant expressions verbatim, except that `Self` is
+/// replaced by the original enum, as within the mirror `Self` would refer to the mirror itself.
+pub(crate) fn enum_discriminants(
+    ident: &Ident,
+    repr: &Ident,
+    variants: &Punctuated<Variant, Comma>,
+) -> (Ident, TokenStream) {
+    let shadow = format_ident!("__{}Discriminants", ident);
+
+    let variants = variants.iter().map(|variant| {
+        let id = &variant.ident;
+
+        match &variant.discriminant {
+            Some((_, expr)) => {
+                let expr = replace_self(expr.to_token_stream(), ident);
+
+                quote!(#id = #expr)
+            }
+            None => quote!(#id),
+        }
+    });
+
+    let definition = quote!(
+        #[repr(#repr)]
+        #[allow(non_camel_case_types, dead_code)]
+        enum #shadow {
+            #(#variants),*
+        }
+    );
+
+    (shadow, definition)
+}
+
+/// Replaces `Self` with the given identifier in the tokens of a discriminant expression.
+fn replace_self(tokens: TokenStream, replacement: &Ident) -> TokenStream {
+    tokens
+        .into_iter()
+        .map(|token| match token {
+            TokenTree::Ident(ident) if ident == "Self" => TokenTree::Ident(replacement.clone()),
+            TokenTree::Group(group) => {
+                let stream = replace_self(group.stream(), replacement);
+
+                let mut new_group = Group::new(group.delimiter(), stream);
+                new_group.set_span(group.span());
+
+                TokenTree::Group(new_group)
+            }
+            token => token,
+        })
+        .collect()
 }
