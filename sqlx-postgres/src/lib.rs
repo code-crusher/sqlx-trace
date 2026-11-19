@@ -51,7 +51,9 @@ pub use arguments::{PgArgumentBuffer, PgArguments};
 pub use bind_iter::PgBindIterExt;
 pub use column::PgColumn;
 pub use connection::PgConnection;
-pub use copy::{PgCopyIn, PgPoolCopyExt};
+pub use copy::{
+    CopyRow, EncodableField, PgCopyIn, PgCopyInBinary, PgCopyOutBinary, PgPoolCopyExt,
+};
 pub use database::Postgres;
 pub use error::{PgDatabaseError, PgErrorPosition};
 pub use listener::{PgListener, PgNotification};

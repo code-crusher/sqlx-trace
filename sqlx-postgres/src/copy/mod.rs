@@ -1,3 +1,7 @@
+mod binary;
+
+pub use binary::{CopyRow, EncodableField, PgCopyInBinary, PgCopyOutBinary};
+
 use std::borrow::Cow;
 use std::future::Future;
 use std::ops::{Deref, DerefMut};
