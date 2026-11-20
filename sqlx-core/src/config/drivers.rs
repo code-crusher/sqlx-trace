@@ -1,6 +1,7 @@
 use std::error::Error;
 
-/// Configuration for specific database drivers (**applies to macros and `sqlx-cli` only**).
+/// Configuration for specific database drivers (**applies to macros, `sqlx-cli`, and
+/// `#[sqlx::test]` only**).
 ///
 /// # Note: Does Not Apply at Application Run-Time
 /// As of writing, these configuration parameters do *not* have any bearing on
@@ -9,6 +10,10 @@ use std::error::Error;
 /// Any parameters which overlap with runtime configuration
 /// (e.g. [`drivers.sqlite.unsafe-load-extensions`][SqliteConfig::unsafe_load_extensions])
 /// _must_ be configured their normal ways at runtime (e.g. `SqliteConnectOptions::extension()`).
+///
+/// The exception is `#[sqlx::test]`, which applies this configuration
+/// to the connections it manages for test databases (e.g. so that migrations may use
+/// SQLite extensions).
 ///
 /// See the documentation of individual fields for details.
 #[derive(Debug, Default)]
@@ -84,6 +89,9 @@ pub struct SqliteConfig {
     /// # Note: Does Not Configure Runtime Extension Loading
     /// Extensions to be loaded at runtime *must* be separately configured with
     /// `SqliteConnectOptions::extension()` or `SqliteConnectOptions::extension_with_entrypoint()`.
+    ///
+    /// The exception is `#[sqlx::test]`, which loads the extensions configured here into
+    /// the test database connections it manages (e.g. so that migrations may use them).
     ///
     /// # Safety
     /// This causes arbitrary DLLs on the filesystem to be loaded at execution time,

@@ -30,7 +30,8 @@ database-url-var = "FOO_DATABASE_URL"
 
 # Configure Postgres databases in macros and sqlx-cli.
 [drivers.sqlite]
-# Load extensions into SQLite when running macros or migrations
+# Load extensions into SQLite when running macros, migrations via `sqlx-cli`,
+# or `#[sqlx::test]` (which also applies them to its test database connections)
 #
 # Defaults to an empty list, which has no effect.
 #

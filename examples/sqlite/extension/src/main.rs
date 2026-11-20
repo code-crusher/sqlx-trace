@@ -57,3 +57,50 @@ async fn main() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+// `#[sqlx::test]` also applies the driver configuration from `sqlx.toml`,
+// so migrations and fixtures that need the extensions can run in tests.
+#[cfg(test)]
+mod tests {
+    use sqlx::{query_scalar, SqlitePool};
+
+    #[sqlx::test]
+    async fn test_migrations_with_extensions(pool: SqlitePool) -> sqlx::Result<()> {
+        // These rows were inserted by a migration which requires the
+        // `ipfamily()` extension function: half of the addresses are IPv6
+        // (family 6) and half are IPv4 (family 4).
+        let total: i64 = query_scalar("select count(*) from addresses")
+            .fetch_one(&pool)
+            .await?;
+
+        let ipv6_count: i64 = query_scalar("select count(*) from addresses where family = 6")
+            .fetch_one(&pool)
+            .await?;
+
+        let ipv4_count: i64 = query_scalar("select count(*) from addresses where family = 4")
+            .fetch_one(&pool)
+            .await?;
+
+        assert_eq!(total, 18);
+        assert_eq!(ipv6_count, 9);
+        assert_eq!(ipv4_count, 9);
+
+        // These rows were inserted by a migration which requires the
+        // `uuid4()` extension function.
+        let uuid_count: i64 = query_scalar("select count(*) from uuids")
+            .fetch_one(&pool)
+            .await?;
+
+        assert_eq!(uuid_count, 3);
+
+        // The extensions are also available to the test itself, as it uses
+        // the same connection options.
+        let family: i64 = query_scalar("select ipfamily('192.168.16.12')")
+            .fetch_one(&pool)
+            .await?;
+
+        assert_eq!(family, 4);
+
+        Ok(())
+    }
+}

@@ -416,3 +416,26 @@ jobs:
           DATABASE_URL: sqlite://todos.sqlite
           SQLX_OFFLINE: ${{ matrix.offline == 'offline' }}
         run: cargo run -p sqlx-example-sqlite-todos
+
+      # Downloads the SQLite extensions used by the example into /tmp/sqlite3-lib,
+      # where its `sqlx.toml` expects to find them.
+      - name: Extension (Download SQLite Extensions)
+        run: ./examples/sqlite/extension/download-extension.sh
+
+      - name: Extension (Setup)
+        env:
+          DATABASE_URL: sqlite://extension.sqlite
+        run: sqlx db setup --source=examples/sqlite/extension/migrations
+
+      # Exercises `#[sqlx::test]` applying `drivers.sqlite.unsafe-load-extensions`
+      # from `sqlx.toml` when running migrations (issue #4372).
+      - name: Extension (Test)
+        env:
+          DATABASE_URL: sqlite://extension.sqlite
+        run: cargo test -p sqlx-example-sqlite-extension
+
+      - name: Extension (Run)
+        env:
+          DATABASE_URL: sqlite://extension.sqlite
+          SQLX_OFFLINE: ${{ matrix.offline == 'offline' }}
+        run: cargo run -p sqlx-example-sqlite-extension

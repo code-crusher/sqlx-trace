@@ -205,6 +205,38 @@ async fn basic_test(pool: PgPool) -> sqlx::Result<()> {
 # }
 ```
 
+### Driver Configuration (requires `migrate` feature)
+
+`#[sqlx::test]` also applies the driver-specific configuration from the [`drivers` section](https://docs.rs/sqlx/latest/sqlx/_config/drivers/index.html)
+of your `sqlx.toml` file (if present) to the connections it manages for the test database.
+
+Most notably, this means that [`drivers.sqlite.unsafe-load-extensions`](https://docs.rs/sqlx/latest/sqlx/_config/drivers/struct.SqliteConfig.html#field.unsafe_load_extensions)
+is honored when running migrations, applying fixtures, and in the connections passed to your test,
+so migrations that require SQLite extensions can be used with `#[sqlx::test]`.
+
+`sqlx.toml`:
+```toml
+[drivers.sqlite]
+unsafe-load-extensions = ["uuid"]
+```
+
+```rust,no_run
+# #[cfg(all(feature = "migrate", feature = "_sqlite"))]
+# mod example {
+use sqlx::SqlitePool;
+
+// The `uuid` extension configured above is loaded into the test database,
+// so migrations using its functions can be applied.
+#[sqlx::test]
+async fn basic_test(pool: SqlitePool) -> sqlx::Result<()> {
+    // e.g. a table created by a migration using `uuid4()`
+    sqlx::query("SELECT uuid4()").execute(&pool).await?;
+
+    Ok(())
+}
+# }
+```
+
 ### Automatic Fixture Application (requires `migrate` feature)
 
 Since tests are isolated from each other but may require data to already exist in the database to keep from growing

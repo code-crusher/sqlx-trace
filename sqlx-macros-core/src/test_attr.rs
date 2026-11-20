@@ -166,6 +166,14 @@ fn expand_advanced(args: AttributeArgs, input: syn::ItemFn) -> crate::Result<Tok
         _ => quote! {},
     };
 
+    // Driver configuration from `sqlx.toml` (e.g. SQLite extensions to load) needs to be
+    // applied to the test database connections, otherwise migrations or fixtures that
+    // rely on it (e.g. SQLite extensions) would fail to run.
+    //
+    // Only the configuration for built-in drivers can be passed through here as the
+    // configuration for external drivers is not constructible in generated code.
+    let driver_config = expand_driver_config(&config);
+
     Ok(quote! {
         #(#attrs)*
         #[::core::prelude::v1::test]
@@ -180,12 +188,57 @@ fn expand_advanced(args: AttributeArgs, input: syn::ItemFn) -> crate::Result<Tok
 
             args.fixtures(&[#(#fixtures),*]);
 
+            #driver_config
+
             // We need to give a coercion site or else we get "unimplemented trait" errors.
             let f: fn(#(#fn_arg_types),*) -> _ = #name;
 
             ::sqlx::testing::TestFn::run_test(f, args)
         }
     })
+}
+
+/// Expand the driver-specific configuration from `sqlx.toml` (if any) to be applied to the
+/// connect options of the test database.
+#[cfg(feature = "migrate")]
+fn expand_driver_config(config: &sqlx_core::config::Config) -> TokenStream {
+    use sqlx_core::config::drivers::SqliteExtension;
+
+    if config.drivers.sqlite.unsafe_load_extensions.is_empty() {
+        return quote! {};
+    }
+
+    let extensions = config
+        .drivers
+        .sqlite
+        .unsafe_load_extensions
+        .iter()
+        .map(|extension| match extension {
+            SqliteExtension::Path(path) => {
+                quote! {
+                    ::sqlx::testing::drivers::SqliteExtension::Path(
+                        ::std::string::String::from(#path)
+                    )
+                }
+            }
+            SqliteExtension::PathWithEntrypoint { path, entrypoint } => {
+                quote! {
+                    ::sqlx::testing::drivers::SqliteExtension::PathWithEntrypoint {
+                        path: ::std::string::String::from(#path),
+                        entrypoint: ::std::string::String::from(#entrypoint),
+                    }
+                }
+            }
+        });
+
+    quote! {
+        args.driver_config(::sqlx::testing::drivers::Config {
+            sqlite: ::sqlx::testing::drivers::SqliteConfig {
+                unsafe_load_extensions: ::std::vec![#(#extensions),*],
+            },
+            ..::std::default::Default::default()
+        });
+    }
 }
 
 #[cfg(feature = "migrate")]
