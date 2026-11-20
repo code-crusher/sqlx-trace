@@ -120,6 +120,69 @@ async fn it_describes_composite() -> anyhow::Result<()> {
     Ok(())
 }
 
+// Regression test for #4332: `RETURNING old.<col>`/`new.<col>` reference the
+// OLD/NEW transition relations (PostgreSQL 18+) and are null depending on the
+// operation, even when the underlying column is `NOT NULL`.
+#[sqlx_macros::test]
+async fn it_describes_returning_transition_relations() -> anyhow::Result<()> {
+    let mut conn = new::<Postgres>().await?;
+
+    // Transition relations were introduced in PostgreSQL 18.
+    if !matches!(conn.server_version_num(), Some(version) if version >= 180_000) {
+        return Ok(());
+    }
+
+    conn.execute("DROP TABLE IF EXISTS issue_4332_files")
+        .await?;
+    conn.execute(
+        "CREATE TABLE issue_4332_files (hash BYTEA PRIMARY KEY CHECK (LENGTH(hash) = 32))",
+    )
+    .await?;
+
+    let d = conn
+        .describe(
+            "INSERT INTO issue_4332_files (hash) VALUES ('\\xdeadbeef'::bytea) \
+             ON CONFLICT (hash) DO NOTHING RETURNING old.hash"
+                .into_sql_str(),
+        )
+        .await?;
+    assert_eq!(d.nullable(0), Some(true));
+
+    // A plain reference to the column is still non-nullable.
+    let d = conn
+        .describe(
+            "INSERT INTO issue_4332_files (hash) VALUES ('\\xdeadbeef'::bytea) \
+             ON CONFLICT (hash) DO NOTHING RETURNING hash"
+                .into_sql_str(),
+        )
+        .await?;
+    assert_eq!(d.nullable(0), Some(false));
+
+    // The same expression may also be returned more than once, and a plain
+    // column reference in the same `RETURNING` list keeps its own nullability.
+    let d = conn
+        .describe(
+            "INSERT INTO issue_4332_files (hash) VALUES ('\\xdeadbeef'::bytea) \
+             ON CONFLICT (hash) DO NOTHING RETURNING old.hash, old.hash AS h, hash"
+                .into_sql_str(),
+        )
+        .await?;
+    assert_eq!(d.nullable(0), Some(true));
+    assert_eq!(d.nullable(1), Some(true));
+    assert_eq!(d.nullable(2), Some(false));
+
+    // `new` is null for a row removed by `DELETE`.
+    let d = conn
+        .describe("DELETE FROM issue_4332_files RETURNING old.hash, new.hash".into_sql_str())
+        .await?;
+    assert_eq!(d.nullable(0), Some(true));
+    assert_eq!(d.nullable(1), Some(true));
+
+    conn.execute("DROP TABLE issue_4332_files").await?;
+
+    Ok(())
+}
+
 // Regression test for #4497: resolving one custom type could drop other
 // pending dependencies, leaving them unresolved on a cold type cache.
 #[sqlx_macros::test]
